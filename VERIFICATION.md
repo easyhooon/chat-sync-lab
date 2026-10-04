@@ -33,7 +33,7 @@ Android 테스트는 REST/WS 중복 병합, 늦은 HTTP 실패가 SENT를 되돌
 
 - Lint 경고 12개: 이전 target SDK 1개, 의존성 최신 버전 안내 9개, backup 설정 1개, 앱 아이콘 1개. 로컬 첫 실행에는 오류가 없지만 제품화 전에 정리해야 한다. 경고를 숨기지 않았다.
 - 두 에뮬레이터 동시 왕복·실기기·Android instrumentation UI 테스트는 미실행. 합의한 한 Android 세션 + 테스트 peer를 실제 사용했다.
-- 자동 reconnect/backoff, 실제 네트워크 단절 중 전송/ACK 유실 주입, 영속 DB/outbox, 다중 서버, 장시간 부하·slow subscriber 스트레스는 미실행/미구현.
+- 자동 reconnect/backoff, 실제 무선망 단절, 영속 DB/outbox, 다중 서버, 장시간 부하·slow subscriber 스트레스는 미실행/미구현. 수락 알림 유실은 아래 두 번째 단위에서 로컬 테스트 프록시로 검증했다.
 - `SENT`는 현재 프로세스 메모리 수락이다. 프로세스 재시작 뒤 기록·중복 키·sequence는 보존되지 않는다. 실제 인증은 없다.
 
 ## 증거
@@ -47,3 +47,44 @@ Android 테스트는 REST/WS 중복 병합, 늦은 HTTP 실패가 SENT를 되돌
 ```bash
 python3 scripts/verify-evidence.py
 ```
+
+## 두 번째 단위: 수락 뒤 응답 유실 — 2026-10-04
+
+최종 debug APK를 같은 `emulator-5554`에 다시 설치하고, 기존 메모리 서버 앞의 **별도 테스트 프록시**로 두 경우를 실제 실행했다. 기본 서버 API에는 실패 제어를 추가하지 않았다. 프록시는 `server/src/test`에 있고 명시 실행 때만 loopback 8081/8082를 연다. 앱의 실험 모드는 debug에서만 선택되며 기본/릴리스 연결은 8080이다.
+
+| 검사 | 실제 결과 |
+|---|---|
+| `:server:test` | 기존 6 + 실제 Netty loopback 프록시 2 = 8 tests, failures/errors/skips 0 |
+| `:app:testDebugUnitTest` | 11 tests, failures/errors/skips 0 |
+| `:app:assembleDebug`, APK 설치 | 성공, 최종 APK로 두 경우 확인 |
+| `:app:lintDebug` | 0 errors, 12 warnings — 기존 경고 수 유지 |
+| HTTP + WS 수락 알림 유실 | 실제 `SENDING → UNKNOWN`; 앱이 UNKNOWN일 때 서버 history에는 이미 수락 메시지가 있음 |
+| UNKNOWN 같은 ID 수동 재시도 | HTTP `201 → 200`, history `7 → 8 → 8`, 원래 서버 ID·sequence 유지, 화면 한 행이 SENT로 변경 |
+| HTTP만 유실, WS 수락 도착 | WS로 SENT 후 8초 HTTP timeout; 로그 `resultingStatus=SENT`, UNKNOWN/오류/재시도 버튼 없음, history `8 → 9` |
+| 실험 정리·기본 연결 복원 | 본 작업의 프록시만 종료, reverse 8081/8082만 제거. 기본 앱 재시작 후 8080 연결·9개 snapshot 복원; 8080만 listen |
+| 로컬 증거 대조 스크립트 | `python3 scripts/verify-ack-loss-evidence.py` 통과 |
+
+두 알림 유실의 최종 메시지는 client ID `1b0e7253-f4d4-43bc-872c-635538030632`, 서버 ID `2c745602-9387-42b4-ac93-8b28f91b093f`, sequence `8`이다. HTTP-only 비교는 client ID `901ca9ae-19e9-4d09-92cc-5c01042b0407`, 서버 ID `9cb4a659-d97b-4536-a6df-8919429a3542`, sequence `9`다. 모두 이 로컬 서버 프로세스의 테스트 데이터다.
+
+프록시는 서버 수락 응답을 받은 **뒤** 앱의 HTTP 응답을 60초 지연시킨다. BOTH에서는 해당 Alice 메시지의 WS 이벤트도 숨긴다. 8초 timeout 이후 앱 기다림은 끝나지만 서버 append는 이미 완료돼 있다. 앱의 coroutine 취소가 서버의 완료된 작업을 rollback하는 관계는 아니다. WS를 받은 비교에서 SENT를 유지한 것도 같은 수락 근거의 차이를 보여준다.
+
+통합 테스트는 실제 loopback 소켓에서 HTTP timeout, 이미 수락된 history, 동일 요청의 200/동일 Message, 추가 WS 이벤트 없음, 다른 sender가 같은 UUID를 사용해도 별도 메시지로 전달됨을 검사한다. 앱 단위 테스트는 자신의 연결된 UNKNOWN 행만 재시도 가능, ID·본문 유지, 이미 SENDING이면 재시도 불가, WS 수락과 늦은 HTTP 실패의 상태·오류 충돌 방지를 검사한다. ViewModel의 CAS 자체를 instrumentation으로 테스트하지는 않았다.
+
+### 검토와 수정
+
+- 별도 읽기 전용 검토에서 프록시의 이벤트 유실 조건에도 sender가 필요함을 확인했다. Alice의 ID만 숨기도록 고치고 Bob의 같은 UUID 전달 테스트를 추가했다.
+- 통합 테스트 준비 중 예외가 나도 이미 시작한 서버·프록시·HTTP client를 정리하도록 자원 정리를 고쳤다.
+- 첫 실제 UNKNOWN 화면에서 오류 문구·재시도 버튼이 추가되며 마지막 행 일부가 가려졌다. 마지막 행의 상태 변화에도 스크롤하게 수정하고 최종 APK에서 버튼이 스크롤 조작 없이 보이는 것을 확인했다.
+- 로컬 실행 연결이 한 차례 잠깐 끊겨 관찰을 멈췄으나 다음 재조회에서 회복했고, 최종 화면·로그·history를 다시 확인했다. 초기 증거 대조 코드는 history 객체의 `messages` 필드를 빠뜨려 실패했다. 아래 최종 스크립트는 실제 JSON 구조를 읽어 통과했다.
+
+### 재현과 증거
+
+실행 절차는 [학습 안내](STUDY_GUIDE.md#직접-따라하기-두-알림-유실)에 있다. 프록시는 첫 Alice POST에 한 번만 주입한다. UNKNOWN 관찰 중 다시 연결하면 snapshot이 이미 수락을 확인하므로 그대로 foreground를 유지한다.
+
+로컬 `evidence/ack-loss/`에 `verification.log`, `proxy-both-final.log`, `proxy-http-only.log`, `android-both-final.log`, `android-http-only.log`, `history-both-*.json`, `history-http-*.json`, `ui-both-*-final.xml`, `ui-http-after-timeout.xml`, 화면 PNG를 보관했다. 파일은 공개 저장소에서 제외한다. 빌드의 JUnit XML과 lint 보고서는 각 모듈 `build`에 있다.
+
+```bash
+python3 scripts/verify-ack-loss-evidence.py
+```
+
+이번 결과는 한 Android 세션 + 로컬 테스트 프록시·서버 검증이다. 두 Android 동시 실행, 실기기·instrumentation, release APK 빌드, 실제 무선망 단절, 앱/서버 재시작 동안의 영속 복구는 미실행이다. proxy 선택의 release 차단은 `BuildConfig.DEBUG` 소스 분기로 확인했다. DB·영속 outbox·자동 retry/reconnect는 추가하지 않았다. 다음 한 가지는 앱 재시작에서 UNKNOWN 행이 사라지는 경계를 재현하고 보존해야 할 필드를 정하는 것이다.

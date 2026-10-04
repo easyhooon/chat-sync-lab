@@ -45,4 +45,14 @@
 서버: 양방향 실시간 왕복, 기록, HTTP/WS 접근 차단, 잘못된 입력, 동일 키 재전송과 충돌, 동시 전송 순서, snapshot 구독 경계.
 Android: debug APK 빌드와 상태 병합 테스트; 기기 상태 확인 후 한 Android 세션 + Bob 테스트 클라이언트 왕복·화면/로그 증거.
 
+## 두 번째 학습 단위: 수락 알림 유실과 같은 ID 재시도
+
+- 일반 서버 API와 메모리 `SENT` 계약은 유지한다.
+- 앱은 자기 `UNKNOWN` 행에만 수동 재시도를 제공한다. 원래 clientMessageId·본문을 유지하고, 같은 행이 `SENDING` → `SENT`로 바뀐다. 중복 클릭은 이미 SENDING이므로 막는다.
+- HTTP 응답과 WS 수락 이벤트를 모두 못 받은 경우만 UNKNOWN이 된다. WS로 수락을 알았다면 HTTP timeout 뒤에도 SENT를 유지한다.
+- 실패 주입은 `server/src/test`의 별도 loopback 테스트 프록시를 명시 실행할 때만 활성화한다. 운영 서버의 제어 API·신규 실패 헤더는 추가하지 않는다.
+- `both` 모드(127.0.0.1:8081)는 첫 Alice POST의 서버 수락 후 HTTP 응답을 앱 timeout보다 늦추고, 해당 ID의 WS 이벤트를 숨긴다. `http-only` 모드(127.0.0.1:8082)는 HTTP 응답만 늦추고 WS는 전달한다.
+- 앱의 proxy 선택은 debug APK의 고정된 로컬 학습 모드만 가능하다. 기본/릴리스는 8080 직접 연결이다. retry는 실패 주입하지 않아 서버의 기존 idempotent 응답을 확인한다.
+- DB·영속 outbox·자동 retry/reconnect·읽음 기능은 이번 단계에 추가하지 않는다. 화면/프로세스가 끝나면 아직 확인하지 못한 로컬 행은 사라진다.
+
 공식 참고: [Ktor WebSockets](https://ktor.io/docs/server-websockets.html), [AGP 9.0 / built-in Kotlin](https://developer.android.com/build/releases/agp-9-0-0-release-notes).

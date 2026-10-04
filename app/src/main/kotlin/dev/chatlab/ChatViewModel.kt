@@ -21,7 +21,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.serialization.json.Json
 
-class ChatViewModel : ViewModel() {
+class ChatViewModel(private val labMode: LabMode = LabMode.DIRECT) : ViewModel() {
     private val json = Json { ignoreUnknownKeys = true }
     private val client = HttpClient(OkHttp) {
         install(ContentNegotiation) { json(json) }
@@ -29,7 +29,7 @@ class ChatViewModel : ViewModel() {
         install(HttpTimeout) { requestTimeoutMillis = 8000; connectTimeoutMillis = 5000 }
         engine { config { pingInterval(20, TimeUnit.SECONDS) } }
     }
-    private val mutableState = MutableStateFlow(ChatState())
+    private val mutableState = MutableStateFlow(ChatState(labMode = labMode))
     val state = mutableState.asStateFlow()
     private var sessionJob: Job? = null
     @Volatile private var generation = 0
@@ -43,11 +43,11 @@ class ChatViewModel : ViewModel() {
         val token = generation
         mutableState.update { old ->
             if (old.user == user) old.copy(connection = "연결 중", error = null)
-            else ChatState(user = user, connection = "연결 중")
+            else ChatState(user = user, connection = "연결 중", labMode = labMode)
         }
         sessionJob = viewModelScope.launch(Dispatchers.IO) {
             try {
-                client.webSocket(urlString = "ws://127.0.0.1:8080/rooms/demo/events", request = { header("X-Test-User", user) }) {
+                client.webSocket(urlString = "ws://127.0.0.1:${labMode.port}/rooms/demo/events", request = { header("X-Test-User", user) }) {
                     for (frame in incoming) {
                         if (frame !is Frame.Text) continue
                         val event = json.decodeFromString<Event>(frame.readText())
@@ -60,7 +60,7 @@ class ChatViewModel : ViewModel() {
                                 else -> current
                             }
                         }
-                        event.message?.let { Log.i("ChatLab", "WS receive sender=${it.senderId} sequence=${it.sequence} id=${it.id} text=${it.text}") }
+                        event.message?.let { Log.i("ChatLab", "WS receive sender=${it.senderId} sequence=${it.sequence} id=${it.id} clientId=${it.clientMessageId} text=${it.text}") }
                     }
                 }
                 connectionLost(token, "실시간 연결이 종료됐습니다. 다시 연결해 기록을 확인하세요.")
@@ -91,16 +91,36 @@ class ChatViewModel : ViewModel() {
         val token = generation
         val id = UUID.randomUUID().toString()
         mutableState.update { it.copy(messages = it.messages + MessageRow(id, user, trimmed), error = null) }
+        submit(SendMessage(id, trimmed), user, token, retry = false)
+    }
+
+    fun retry(id: String) {
+        // Claim the existing row atomically. A second click or a racing WS acceptance cannot claim it twice.
+        while (true) {
+            val current = state.value
+            val request = retryRequest(current, id) ?: return
+            val sending = current.copy(messages = markUnconfirmed(current.messages, id, SendStatus.SENDING),
+                error = current.error?.takeUnless { it.clientMessageId == id })
+            if (mutableState.compareAndSet(current, sending)) {
+                submit(request, current.user, generation, retry = true)
+                return
+            }
+        }
+    }
+
+    private fun submit(request: SendMessage, user: String, token: Int, retry: Boolean) {
+        val id = request.clientMessageId
+        Log.i("ChatLab", "HTTP attempt sender=$user clientId=$id retry=$retry text=${request.text}")
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val response = client.post("http://127.0.0.1:8080/rooms/demo/messages") {
-                    header("X-Test-User", user); contentType(ContentType.Application.Json); setBody(SendMessage(id, trimmed))
+                val response = client.post("http://127.0.0.1:${labMode.port}/rooms/demo/messages") {
+                    header("X-Test-User", user); contentType(ContentType.Application.Json); setBody(request)
                 }
                 if (token != generation) return@launch
                 if (response.status.isSuccess()) {
                     val message = response.body<Message>()
                     updateFor(token) { acceptMessage(it, message) }
-                    Log.i("ChatLab", "HTTP accepted sender=$user sequence=${message.sequence} id=${message.id}")
+                    Log.i("ChatLab", "HTTP accepted sender=$user sequence=${message.sequence} id=${message.id} clientId=$id status=${response.status.value}")
                 } else {
                     val apiError = response.body<ApiError>()
                     val status = if (response.status.value in 400..499) SendStatus.FAILED else SendStatus.UNKNOWN
@@ -110,7 +130,9 @@ class ChatViewModel : ViewModel() {
             catch (error: Exception) {
                 Log.w("ChatLab", "HTTP outcome unknown", error)
                 updateFor(token) { recordSendError(it, id, SendStatus.UNKNOWN,
-                    "전송 결과를 확인하지 못했습니다. 다시 연결하면 서버 기록과 대조합니다.") }
+                    "전송 결과 미확인. 같은 ID로 재시도하거나 다시 연결해 기록을 확인하세요.") }
+                val row = state.value.messages.firstOrNull { it.senderId == user && it.clientMessageId == id }
+                Log.i("ChatLab", "HTTP timeout/error clientId=$id resultingStatus=${row?.status}")
             }
         }
     }

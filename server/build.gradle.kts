@@ -24,3 +24,11 @@ tasks.register<JavaExec>("demoClient") {
     dependsOn(tasks.testClasses)
     standardInput = System.`in`
 }
+tasks.register<JavaExec>("ackLossProxy") {
+    group = "verification"
+    description = "Explicit local test-only ACK-loss proxy; requires -Pscenario=both or http-only"
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass.set("chatlab.AckLossProxyKt")
+    dependsOn(tasks.testClasses)
+    args(providers.gradleProperty("scenario").getOrElse(""))
+}

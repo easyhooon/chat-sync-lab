@@ -38,4 +38,35 @@ class ChatStateTest {
         val result = acceptMessage(uncertain, message)
         assertNull(result.error); assertEquals(SendStatus.SENT, result.messages.single().status)
     }
+    @Test fun bothNotificationsLostRetryKeepsIdTextAndOneRow() {
+        val pending = ChatState(connected = true, messages = listOf(MessageRow("client-1", "alice", "hello")))
+        val unknown = recordSendError(pending, "client-1", SendStatus.UNKNOWN, "timeout")
+        val request = retryRequest(unknown, "client-1")
+        assertEquals(SendMessage("client-1", "hello"), request)
+        val sending = unknown.copy(messages = markUnconfirmed(unknown.messages, "client-1", SendStatus.SENDING))
+        val result = acceptMessage(sending, message)
+        assertEquals(1, result.messages.size); assertEquals(SendStatus.SENT, result.messages.single().status)
+        assertNull(result.error)
+    }
+    @Test fun websocketAcceptanceBeforeHttpTimeoutHasNoUnknownRetry() {
+        val pending = ChatState(connected = true, messages = listOf(MessageRow("client-1", "alice", "hello")))
+        val accepted = acceptMessage(pending, message)
+        val timedOut = recordSendError(accepted, "client-1", SendStatus.UNKNOWN, "timeout")
+        assertEquals(SendStatus.SENT, timedOut.messages.single().status)
+        assertNull(timedOut.error); assertNull(retryRequest(timedOut, "client-1"))
+    }
+    @Test fun retryCannotClaimSendingOrOtherUserOrDisconnectedRow() {
+        val unknown = ChatState(connected = true, messages = listOf(MessageRow("client-1", "alice", "hello", status = SendStatus.UNKNOWN)))
+        assertNotNull(retryRequest(unknown, "client-1"))
+        assertNull(retryRequest(unknown.copy(connected = false), "client-1"))
+        assertNull(retryRequest(unknown.copy(user = "bob"), "client-1"))
+        val claimed = unknown.copy(messages = markUnconfirmed(unknown.messages, "client-1", SendStatus.SENDING))
+        assertNull(retryRequest(claimed, "client-1"))
+    }
+    @Test fun racingEchoWhileRetryInFlightWinsOverRetryHttpFailure() {
+        val state = ChatState(connected = true, messages = listOf(MessageRow("client-1", "alice", "hello")))
+        val accepted = acceptMessage(state, message)
+        val result = recordSendError(accepted, "client-1", SendStatus.UNKNOWN, "retry timeout")
+        assertEquals(accepted, result); assertEquals(1, result.messages.size)
+    }
 }

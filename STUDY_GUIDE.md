@@ -73,4 +73,48 @@ Android는 sequence로 정렬하고 ID로 중복 병합한다. 느린 구독자�
 
 직접 더 관찰하려면 앱을 연결한 채 실행한다. POST를 두 번 했는데 화면에 새 행은 한 개만 생기는지 본다. REST 재전송에 WS 이벤트를 다시 발행하지 않기 때문이다. 이것이 “재시도 횟수”와 “논리 메시지 수”가 다른 가장 작은 사례다.
 
-다음 한 가지는 **수락 응답을 잃어 UNKNOWN이 된 요청을 같은 ID로 재시도해 한 행으로 복구하는 실험**이다. 그 뒤에 영속 outbox/DB가 필요해지는 정확한 실패 경계를 붙이면 된다.
+## 두 번째 학습 단위: timeout이 서버 기록을 지우지는 않는다
+
+Android 화면의 coroutine을 취소하거나 HTTP 요청에 timeout을 걸면 앱의 기다림은 끝난다. 이미 완료된 Room insert를 화면의 Job 취소로 없앨 수 없듯, **이미 서버가 append한 메시지도 앱의 timeout으로 되돌릴 수 없다.** 다만 Room transaction 내부의 취소·rollback과 이 비유를 혼동하면 안 된다. 앱과 서버는 서로 다른 프로세스이고 하나의 transaction이나 cancellation tree를 공유하지 않는다. 처리 도중 연결 끊김이 서버 작업을 취소하는지는 서버 구현에 달려 있다. 이번 실험은 서버 append 완료 **후** 알림을 못 받는 구간을 다룬다.
+
+실제 전송 경로는 `앱 → 로컬 테스트 프록시 → 기존 서버`다. [AckLossProxy.kt](server/src/test/kotlin/chatlab/AckLossProxy.kt)는 요청을 서버에 전달하고 수락 응답을 받은 뒤 앱에 전달할 응답을 60초 늦춘다. 앱은 기존 8초 timeout으로 기다림을 끝낸다. 따라서 “서버가 수락했는가”와 “앱이 HTTP 결과를 받았는가”를 분리해 관찰할 수 있다. 일반 서버 API에 실패 제어를 넣지 않았고, 프록시는 테스트 source set에서 명시 실행할 때만 loopback에 열린다. 앱도 debug에서만 고정 로컬 실험 모드를 선택한다.
+
+| 실험 | 앱이 받은 수락 근거 | 결과 |
+|---|---|---|
+| `both` | HTTP도 없고 그 ID의 WS 이벤트도 없음 | `SENDING → UNKNOWN`; 서버 history에는 이미 있음 |
+| `http-only` | HTTP는 없지만 WS 이벤트가 있음 | WS로 `SENT`가 됨; 나중 HTTP timeout도 SENT를 유지 |
+
+`UNKNOWN`은 “서버가 실패했다”가 아니라 **내가 결과를 모른다**는 뜻이다. 반면 잘못된 본문·접근 거절·키 충돌처럼 서버가 명시적으로 거절한 것은 `FAILED`다. 요청이 서버까지 도달하지 않은 연결 실패와, 이번처럼 수락 뒤 응답이 유실된 경우는 같은 timeout 문구만으로 구분할 수 없다. 이 실험은 서버 history·프록시 수락 로그를 함께 대조해 후자임을 확인한다.
+
+### 같은 행을 재시도하는 코드
+
+[ChatState.kt](app/src/main/kotlin/dev/chatlab/ChatState.kt)의 `retryRequest`는 연결된 자신의 `UNKNOWN` 행에서 **기존 ID와 저장된 본문**을 꺼낸다. [ChatViewModel.kt](app/src/main/kotlin/dev/chatlab/ChatViewModel.kt)의 `retry`는 해당 행을 compare-and-set으로 `SENDING`으로 바꾼 뒤 `send`와 같은 `submit` 경로에 보낸다. 두 번 눌러도 두 번째는 이미 SENDING이라 claim할 수 없다. 그 사이 WS 수락이 도착해 SENT가 됐다면 claim이 실패하거나 수락 상태를 유지한다.
+
+서버는 첫 요청을 이미 기록했으므로 재시도에 `200`과 원래 서버 ID·sequence를 돌려준다. 앱은 `acceptMessage`로 같은 행을 SENT로 바꾸며 새 행을 추가하지 않는다. HTTP 응답과 WS event의 순서를 가정하지 않는 기존 병합 함수도 그대로 사용한다.
+
+### 직접 따라하기: 두 알림 유실
+
+기존 서버는 계속 실행한다. 별도 터미널에서 프록시를 실행한다.
+
+```bash
+./gradlew :server:ackLossProxy -Pscenario=both --console=plain
+```
+
+debug APK를 빌드·설치한 뒤 관찰한 device serial로 학습 모드를 시작한다. ADB가 여러 버전이면 `CHAT_ADB`로 SDK의 platform-tools/adb를 선택한다.
+
+```bash
+bash scripts/ack-loss-lab.sh both emulator-5554
+```
+
+1. 화면의 실험 제목과 연결됨을 확인하고 Alice로 `loss1`을 한 번 보낸다. 앱을 foreground에 둔다.
+2. 8초 뒤 `결과 미확인`과 `같은 ID로 재시도`가 나타난다. 이때 다시 연결하거나 앱을 재시작하지 않는다. 새 snapshot을 받으면 이미 수락을 확인해 SENT가 되기 때문이다.
+3. 다른 터미널에서 아래 history를 확인한다. 앱은 UNKNOWN이지만 서버에는 메시지와 서버 ID·sequence가 있다.
+4. 화면의 같은 ID 재시도를 누른다. client ID가 유지되고 한 행만 서버 수락으로 바뀌는지 본다. history도 다시 조회해 ID·sequence·개수가 그대로인지 확인한다.
+
+```bash
+curl -s -H 'X-Test-User: alice' http://127.0.0.1:8080/rooms/demo/messages
+```
+
+비교하고 싶으면 별도 `http-only` 프록시(`-Pscenario=http-only`, 8082)를 실행하고 `bash scripts/ack-loss-lab.sh http-only emulator-5554`로 새 학습 세션을 시작한다. 새 메시지는 WS로 즉시 서버 수락이 되며 8초 후에도 UNKNOWN/재시도 버튼이 생기지 않는다. 각 프록시는 첫 Alice POST 한 번만 주입하므로 같은 실험을 반복할 때는 해당 프록시만 Ctrl+C 후 재실행한다.
+
+이 단계도 메모리 계약이다. 앱 프로세스가 끝나면 미확인 로컬 행이 사라지고, 서버 프로세스가 끝나면 수락 기록과 중복 키가 사라진다. 다음 한 가지는 **앱 재시작으로 UNKNOWN 행이 사라지는 경계를 재현하고, 보존해야 할 필드를 정하는 것**이다. 아직 DB나 자동 재시도를 추가하지 않았다.

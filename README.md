@@ -8,6 +8,8 @@ Kotlin 개발자를 위한 작은 실시간 채팅 학습 프로젝트. **Ktor �
 - [Android 관점으로 읽는 데이터 경로와 실패 시나리오](STUDY_GUIDE.md)
 - [실제 검증 결과와 한계](VERIFICATION.md)
 
+두 번째 학습 단위는 **수락 알림을 못 받아 UNKNOWN인 메시지를 같은 ID로 수동 재시도**하는 것이다. 기본 앱/서버에는 실패 주입이 없다. [학습 안내의 두 번째 단위](STUDY_GUIDE.md#두-번째-학습-단위-timeout이-서버-기록을-지우지는-않는다)를 따라 별도 테스트 프록시와 debug 학습 모드로만 실행한다.
+
 ## 실행
 
 기존 JDK 21, Android SDK 36/build-tools 36.0.0, `adb`와 ARM64 에뮬레이터가 필요하다. 프로젝트 의존성은 Google Maven·Maven Central·Gradle Plugin Portal에서 받는다. 시스템 도구를 자동 설치하지 않는다.
@@ -52,6 +54,8 @@ adb -s emulator-5554 shell am start -n dev.chatlab/.MainActivity
 `BOB_READY`가 나오면 **2분 이내** 앱에서 `ping`을 보낸다. Bob은 새 Alice 이벤트를 받은 뒤 `Bob reply: ping`을 HTTP로 전송한다. 앱에 응답이 보이고 콘솔에 `ROUND_TRIP_PASS`가 나오면 왕복 성공이다. 오래 걸려 timeout이 나면 peer 명령만 다시 실행한다.
 
 `SENT`/“서버 수락”은 **현재 서버 프로세스의 메모리 기록에 들어갔다**는 뜻이다. 영속 저장·상대 수신·읽음을 뜻하지 않는다. 서버를 종료하면 기록과 중복 키 인덱스가 사라진다.
+
+`UNKNOWN` 행의 “같은 ID로 재시도”는 기존 ID·본문을 유지한다. 연결된 자신의 미확인 행만 재시도하며, 이미 WS로 수락을 확인했다면 HTTP가 timeout 나도 SENT를 유지한다.
 
 ## 직접 해볼 실험
 
