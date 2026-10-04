@@ -29,7 +29,7 @@ class MainActivity : ComponentActivity() {
                 "http-only" -> LabMode.HTTP_LOST
                 else -> LabMode.DIRECT
             } else LabMode.DIRECT
-            ChatViewModel(mode)
+            ChatViewModel((application as ChatApplication).outbox, mode)
         } }
     }
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -59,6 +59,13 @@ private fun ChatRoute(viewModel: ChatViewModel) {
 @Composable
 fun ChatScreen(state: ChatState, onSelectUser: (String) -> Unit, onReconnect: () -> Unit, onSend: (String) -> Unit, onRetry: (String) -> Unit) {
     var draft by rememberSaveable(state.user) { mutableStateOf("") }
+    var observedQueuedId by rememberSaveable(state.user) { mutableStateOf(state.lastQueuedId) }
+    LaunchedEffect(state.lastQueuedId) {
+        if (state.lastQueuedId != observedQueuedId) {
+            if (state.lastQueuedId != null) draft = ""
+            observedQueuedId = state.lastQueuedId
+        }
+    }
     val listState = rememberLazyListState()
     LaunchedEffect(state.messages.lastOrNull()?.clientMessageId, state.messages.lastOrNull()?.status, state.messages.size) {
         if (state.messages.isNotEmpty()) listState.animateScrollToItem(state.messages.lastIndex)
@@ -78,7 +85,7 @@ fun ChatScreen(state: ChatState, onSelectUser: (String) -> Unit, onReconnect: ()
             state.error?.let { Text(it.message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (state.messages.isEmpty()) item { Text("첫 메시지를 보내세요.") }
-                items(state.messages, key = { "${it.senderId}:${it.clientMessageId}" }) { row ->
+                items(state.messages, key = { "${it.roomId}:${it.senderId}:${it.clientMessageId}" }) { row ->
                     val own = row.senderId == state.user
                     Column(Modifier.fillMaxWidth(), horizontalAlignment = if (own) Alignment.End else Alignment.Start) {
                         Card(colors = CardDefaults.cardColors(containerColor = if (own) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh)) {
@@ -93,7 +100,7 @@ fun ChatScreen(state: ChatState, onSelectUser: (String) -> Unit, onReconnect: ()
                                 } else "#${row.sequence}", style = MaterialTheme.typography.labelSmall)
                                 if (state.labMode != LabMode.DIRECT) Text("client ID ${row.clientMessageId.take(8)}", style = MaterialTheme.typography.labelSmall)
                                 if (own && row.status == SendStatus.UNKNOWN) {
-                                    TextButton(onClick = { onRetry(row.clientMessageId) }, enabled = state.connected) { Text("같은 ID로 재시도") }
+                                    TextButton(onClick = { onRetry(row.clientMessageId) }, enabled = state.connected && state.outboxReady) { Text("같은 ID로 재시도") }
                                 }
                             }
                         }
@@ -102,8 +109,8 @@ fun ChatScreen(state: ChatState, onSelectUser: (String) -> Unit, onReconnect: ()
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(value = draft, onValueChange = { if (it.length <= 1000) draft = it },
-                    modifier = Modifier.weight(1f), label = { Text("메시지") }, maxLines = 3)
-                Button(onClick = { onSend(draft); draft = "" }, enabled = state.connected && draft.isNotBlank()) { Text("전송") }
+                    modifier = Modifier.weight(1f), label = { Text("메시지") }, maxLines = 3, enabled = !state.queueing)
+                Button(onClick = { onSend(draft) }, enabled = state.connected && state.outboxReady && !state.queueing && draft.isNotBlank()) { Text("전송") }
             }
             Text("수락 = 현재 서버 프로세스의 기록. 서버 재시작 시 삭제됩니다.", style = MaterialTheme.typography.labelSmall)
         }

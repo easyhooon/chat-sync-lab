@@ -117,4 +117,83 @@ curl -s -H 'X-Test-User: alice' http://127.0.0.1:8080/rooms/demo/messages
 
 비교하고 싶으면 별도 `http-only` 프록시(`-Pscenario=http-only`, 8082)를 실행하고 `bash scripts/ack-loss-lab.sh http-only emulator-5554`로 새 학습 세션을 시작한다. 새 메시지는 WS로 즉시 서버 수락이 되며 8초 후에도 UNKNOWN/재시도 버튼이 생기지 않는다. 각 프록시는 첫 Alice POST 한 번만 주입하므로 같은 실험을 반복할 때는 해당 프록시만 Ctrl+C 후 재실행한다.
 
-이 단계도 메모리 계약이다. 앱 프로세스가 끝나면 미확인 로컬 행이 사라지고, 서버 프로세스가 끝나면 수락 기록과 중복 키가 사라진다. 다음 한 가지는 **앱 재시작으로 UNKNOWN 행이 사라지는 경계를 재현하고, 보존해야 할 필드를 정하는 것**이다. 아직 DB나 자동 재시도를 추가하지 않았다.
+두 번째 단위까지는 앱 프로세스가 끝나면 미확인 로컬 행이 사라졌고, 서버 프로세스가 끝나면 수락 기록과 중복 키가 사라졌다. 아래 세 번째 단위는 앞의 클라이언트 경계를 Room으로 보완한다. 서버 메모리 계약은 그대로다.
+
+## 세 번째 학습 단위: Room outbox와 프로세스 종료
+
+Room CRUD는 이미 알고 있으므로 **어떤 경계에서 무엇을 알 수 있는가**에 집중한다. 이번에는 자신의 송신 의도와 수락 영수증만 Room에 넣었다. 수신 메시지 전체 캐시·Paging은 다음 단위다. UI는 지금 `Room의 미확인/거절 행 + 현재 서버에서 받은 수락 메시지`를 병합한다.
+
+```mermaid
+sequenceDiagram
+    participant UI as Compose
+    participant VM as ChatViewModel
+    participant DB as Room outbox
+    participant Server as 메모리 서버
+    UI->>VM: send(text)
+    VM->>DB: (user, room, client ID, text, SENDING) insert
+    DB-->>VM: 로컬 commit 완료
+    VM->>Server: 같은 ID로 POST
+    Server->>Server: append · 중복 키 검사
+    Server-->>VM: HTTP 또는 WS 수락
+    VM->>DB: 같은 키의 SENT / 서버 ID / sequence 갱신
+    DB-->>VM: Flow 갱신
+    VM-->>UI: 서버 수락 + outbox 병합
+```
+
+### 두 commit 사이에는 transaction이 없다
+
+[Outbox.kt](app/src/main/kotlin/dev/chatlab/Outbox.kt)의 `OutboxEntry`는 `(userId, roomId, clientMessageId)`를 primary key로 사용한다. ID·정규화된 text·status·로컬 생성 시각·수락된 serverId/sequence가 저장된다. `ChatApplication`이 프로세스당 하나의 DB/store를 가진다. [ChatViewModel.kt](app/src/main/kotlin/dev/chatlab/ChatViewModel.kt)는 `outbox.enqueue(entry)`가 성공한 다음 POST한다. 저장 실패면 POST하지 않고 입력을 유지한다. 입력을 지우는 기준도 버튼 클릭이 아니라 로컬 저장 완료다.
+
+| 종료/실패 위치 | 남는 정보 | 다음 실행의 해석 |
+|---|---|---|
+| 로컬 commit 전 | 송신 의도 없음, POST도 시작하지 않음 | 입력 유지. 다시 전송할 때 새 의도 생성 |
+| 로컬 commit 후, POST 전 | SENDING, 서버에 도착하지 않았을 수 있음 | UNKNOWN으로 복구, 동일 ID 수동 재시도 가능 |
+| 서버 수락 후, HTTP/WS 수신 전 | 로컬 SENDING/UNKNOWN, 서버에는 이미 있을 수 있음 | UNKNOWN. snapshot으로 대조하거나 동일 ID 재시도 |
+| 앱이 수락을 받았지만 로컬 receipt 갱신 전 | DB에는 아직 SENDING일 수 있음 | 다음 실행은 UNKNOWN; snapshot/같은 ID로 재확인 |
+| 로컬 SENT 갱신 후 | 수락 영수증 있음 | 늦은 timeout/거절로 SENT를 되돌리지 않음 |
+
+Room transaction은 로컬 SQLite 원자성을 제공한다. 서버 append까지 묶어서 commit하는 transaction은 아니다. 둘 사이에 프로세스 종료가 들어갈 수 있으므로 outbox가 필요한 것이다. `SENDING`을 저장했다는 사실만으로 POST가 서버에 도달했다고 말할 수 없고, 반대로 HTTP timeout만으로 서버 미수락이라고 말할 수 없다.
+
+### 죽은 SENDING과 살아 있는 요청을 구분하기
+
+새 프로세스의 `OutboxStore.initialize()`는 이전 SENDING을 UNKNOWN으로 바꾼다. 이전 coroutine은 살아 있지 않지만 이미 서버에 도달한 요청은 처리됐을 수 있기 때문이다. DB의 ID·본문·계정·방·생성 시각은 유지한다. **복구가 자동 재전송은 아니다.**
+
+이 초기화는 프로세스당 한 번이다. 계정을 바꾸거나 WS를 다시 연결할 때 반복하면, 같은 프로세스의 살아 있는 HTTP 요청까지 UNKNOWN으로 바꿔 중복 retry를 허용할 수 있다. ON_STOP은 WS/화면 관찰을 정리하지만 HTTP 결과는 원래 계정·방의 DB에 계속 반영할 수 있다. ViewModel이 정상적으로 취소되면 guarded UNKNOWN 갱신을 시도하고, hard kill에는 그 정리 코드가 실행되지 않으므로 다음 프로세스의 복구가 담당한다.
+
+### StateFlow CAS에서 DB 조건부 갱신으로
+
+이전 retry는 메모리의 compare-and-set으로 행을 claim했다. 이제 `OutboxDao.claimRetry()`의 transaction이 정확한 `(user, room, ID)`의 **UNKNOWN + serverId 없음**을 조건으로 SENDING으로 바꾸고 원래 행을 읽는다. 갱신 수가 1인 요청만 POST한다. 두 번 누르면 두 번째 갱신 수는 0이다. 취소된 transaction은 claim을 rollback한다.
+
+HTTP·WS 수락은 `OutboxStore.accept()`/`acceptSnapshot()`으로 동일 행을 갱신한다. 다른 sender/room 메시지로 자신의 outbox를 수락 처리하지 않는다. 다른 계정으로 화면을 바꾼 뒤 이전 HTTP가 끝나도 원래 키의 DB만 갱신하고, generation 검사가 새 계정의 UI 갱신을 막는다. 늦은 실패 갱신은 SENDING이면서 serverId가 없는 행에만 적용하므로 이미 SENT인 receipt를 되돌릴 수 없다.
+
+Room Flow가 비동기적으로 이전 UNKNOWN 값을 내보내더라도 [ChatState.kt](app/src/main/kotlin/dev/chatlab/ChatState.kt)의 `mergeOutbox`는 현재 HTTP/WS로 수락된 행을 먼저 보호한다. DB Flow의 미확인 행과 서버 수락 행이 한 논리 메시지를 두 줄로 만들지 않는다.
+
+### 로컬 receipt와 서버의 현재 history는 다르다
+
+완료된 SENT receipt도 DB에 남겨 늦은 실패를 막는다. 하지만 서버 재시작 뒤 빈 snapshot을 받았는데 과거 receipt를 현재 서버 history처럼 보여주지는 않는다. 이번 서버는 메모리이므로 이전 수락 기록과 idempotency 키가 사라진다. **클라이언트 outbox 영속성과 서버 중복 방지 영속성은 별개다.** UNKNOWN을 같은 ID로 재시도해도 서버가 재시작했다면 새로운 서버 ID·sequence로 수락할 수 있다. 이번 구조를 exactly-once나 영속 서버 저장 보장으로 설명하면 안 된다.
+
+### 직접 종료·재실행하기
+
+`adb shell am force-stop dev.chatlab`은 이 앱 프로세스를 종료하지만 DB 데이터는 지우지 않는다. `pm clear`, 앱 삭제, 새 AVD의 데이터 초기화는 다른 실험이며 이번 검증에는 사용하지 않았다.
+
+1. ACK 유실 또는 연결 실패로 자신의 UNKNOWN 행을 만든다. ID·본문·서버 history를 기록한다.
+2. 이 앱만 force-stop한다. 해당 모드의 ADB reverse를 제거하고 재실행하면 서버 snapshot 없이 Room 복구만 관찰할 수 있다. BOTH 모드는 8081, 기본 모드는 8080이다.
+3. 같은 ID·본문·UNKNOWN이 남았는지 본다. Bob으로 바꿨을 때 Alice의 미확인 행이 보이지 않고, Alice로 돌아가면 복구되는지 본다.
+4. reverse와 연결을 복원한다. 서버에 이미 있던 메시지는 snapshot으로 SENT가 되고, 서버에 없던 미확인 메시지는 같은 ID 수동 재시도로 보낸다. 자동 POST는 없다.
+
+멈춘 debug 앱의 DB와 WAL을 함께 읽어 로컬 증거로 저장할 수 있다. 실행 중 DB를 따로 복사하면 서로 다른 시점의 main DB/WAL이 섞일 수 있으므로 스크립트는 프로세스가 멈췄는지 먼저 검사한다. 자신의 테스트 DB만 `evidence`에 저장하며 공개 Git에서는 제외한다.
+
+```bash
+adb -s emulator-5554 shell am force-stop dev.chatlab
+bash scripts/capture-outbox-db.sh emulator-5554 after-stop
+```
+
+실제 [DB instrumentation 테스트](app/src/androidTest/kotlin/dev/chatlab/OutboxDatabaseTest.kt)는 DB 재열기, SENDING 복구, 계정·방 키 격리, 24개 동시 claim, 수락/실패 순서, 중복 receipt, snapshot 대조와 취소 rollback을 검사한다. 버전 1 schema는 `app/schemas`에 공개 관리한다. 스키마를 바꿀 때 migration을 추가해야 하며 destructive fallback은 사용하지 않았다.
+
+### 다음은 수신 캐시, 그 다음은 과거 페이징
+
+다음 한 단위는 **수신 기록도 Room에 넣어 HTTP·WS·outbox 수락이 동일 메시지 저장소로 모이게 하는 것**이다. 그 뒤 서버 cursor 과거기록 조회와 Room PagingSource를 연결한다. UI가 네트워크 결과를 직접 목록에 추가하는 대신 DB를 읽고, idempotent upsert가 실시간/과거 페이지의 겹침을 처리하도록 확장한다.
+
+과거 기록 페이징과 재접속 누락 보충은 같은 문제가 아니다. 전자는 이미 가진 가장 오래된 기록 이전을 가져오고, 후자는 마지막으로 확인한 순서 이후 빠진 메시지를 보충한다. 이 경계와 실시간 수신 중 스크롤 앵커를 검증한 뒤 Paging3/RemoteMediator 필요성을 판단한다. 이번에는 Paging·수신 전체 캐시·서버 DB·푸시를 넣지 않았다.
+
+공식 참고: [Room 의존성·schema 설정](https://developer.android.com/jetpack/androidx/releases/room), [실제 기기에서 Room DB 테스트](https://developer.android.com/training/data-storage/room/testing-db), [Room transaction API](https://developer.android.com/reference/kotlin/androidx/room/package-summary#withTransaction(androidx.room.RoomDatabase,kotlin.coroutines.SuspendFunction0)).

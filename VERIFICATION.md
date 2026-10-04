@@ -29,7 +29,7 @@ Android 테스트는 REST/WS 중복 병합, 늦은 HTTP 실패가 SENT를 되돌
 - 초기 AVD의 System UI ANR 팝업은 `Wait`를 선택해 해소했다. 다른 앱은 종료하지 않았다. 입력 이벤트 지연 때문에 첫 Bob peer는 2분 timeout으로 종료됐으며, 입력과 전송을 분리한 다음 실행에서 왕복을 확인했다.
 - 읽기 전용 Codex 리뷰에서 WS 수락 후 늦은 POST 실패의 오류 문구 모순과 Bob peer의 “다음 프레임이 반드시 echo” 가정을 찾았다. 상태 reducer와 ID 기반 echo 대기로 고치고 검사·빌드를 다시 통과시켰다.
 
-## 남아 있는 한계
+## 첫 단위 종료 시 한계
 
 - Lint 경고 12개: 이전 target SDK 1개, 의존성 최신 버전 안내 9개, backup 설정 1개, 앱 아이콘 1개. 로컬 첫 실행에는 오류가 없지만 제품화 전에 정리해야 한다. 경고를 숨기지 않았다.
 - 두 에뮬레이터 동시 왕복·실기기·Android instrumentation UI 테스트는 미실행. 합의한 한 Android 세션 + 테스트 peer를 실제 사용했다.
@@ -87,4 +87,55 @@ python3 scripts/verify-evidence.py
 python3 scripts/verify-ack-loss-evidence.py
 ```
 
-이번 결과는 한 Android 세션 + 로컬 테스트 프록시·서버 검증이다. 두 Android 동시 실행, 실기기·instrumentation, release APK 빌드, 실제 무선망 단절, 앱/서버 재시작 동안의 영속 복구는 미실행이다. proxy 선택의 release 차단은 `BuildConfig.DEBUG` 소스 분기로 확인했다. DB·영속 outbox·자동 retry/reconnect는 추가하지 않았다. 다음 한 가지는 앱 재시작에서 UNKNOWN 행이 사라지는 경계를 재현하고 보존해야 할 필드를 정하는 것이다.
+두 번째 단위 결과는 한 Android 세션 + 로컬 테스트 프록시·서버 검증이다. 당시 두 Android 동시 실행, 실기기·instrumentation, release APK 빌드, 실제 무선망 단절, 앱/서버 재시작 동안의 영속 복구는 미실행이었다. proxy 선택의 release 차단은 `BuildConfig.DEBUG` 소스 분기로 확인했다. 아래 세 번째 단위에서 Room outbox와 앱 프로세스 재시작 복구를 추가했다. 서버 DB·자동 retry/reconnect는 여전히 없다.
+
+## 세 번째 단위: Room outbox — 2026-10-05 (한국시간)
+
+착수 시 local/remote main은 `a3af39c6923a523b6ada3f77249a8b98d290fb21`로 일치했고 clean이었다. 연결 기기·8080 서버가 없음을 확인한 뒤 이 프로젝트의 기존 loopback 서버와 Pixel_8a 한 개를 다시 실행했다. Java/Gradle/Kotlin/AGP는 유지하고 Room 2.8.5·KSP 2.3.10·Android test 의존성을 공식 프로젝트 저장소에서 사용했다. 새 시스템 도구·계정·서비스는 설치하지 않았다.
+
+### 실제 통과한 검사
+
+| 검사 | 결과 |
+|---|---|
+| `:server:test` | 기존 서버 6 + ACK 프록시 2 = 8 tests, failures/errors/skips 0 |
+| `:app:testDebugUnitTest` | 14 tests, failures/errors/skips 0 |
+| `:app:connectedDebugAndroidTest` | 실제 API 34 AVD의 Room DB 8 tests, failures/errors/skips 0 |
+| Debug/instrumentation APK 빌드·설치 | 성공, 최종 구현 APK로 아래 화면·DB 검증 |
+| `:app:lintDebug` | errors 0, warnings 15 (이전 12 + 새 빌드/의존성 버전 안내) |
+| BOTH 수락 유실 | `OUTBOX_COMMITTED` 다음 POST; UNKNOWN→동일 ID 수동 retry→200/SENT, 서버 history 1→1, DB receipt 한 행 |
+| HTTP-only 수락 유실 | WS로 수락 후 HTTP timeout; UI·DB 모두 SENT, UNKNOWN/재시도 버튼 없음 |
+| UNKNOWN 프로세스 재시작 | PID `8065→8349`; snapshot 없는 offline 화면에 같은 ID·본문·UNKNOWN 복구; DB의 모든 필드 동일 |
+| 실제 계정 전환 | Bob에는 Alice UNKNOWN 없음; Alice로 돌아오면 한 행 복원; DB 변경 없음 |
+| 재연결·수동 재시도 | reconnect만으로 POST하지 않음; 서버 2개 그대로. 버튼을 눌러 원래 ID·본문·계정·방·생성 시각을 유지해 201/SENT, 서버 3개 |
+| SENDING 중 hard kill | 서버 수락 뒤 앱 PID 9135 종료, 멈춘 DB에 SENDING; 새 실행 로그 recoveredSending=1, 같은 필드의 UNKNOWN 복구 |
+| 재시작 뒤 snapshot 대조 | 서버의 수락 기록으로 SENT 갱신, 신규 POST 없이 history 4개 유지 |
+| 기본 상태 복원 | 최종 화면 4개 서버 수락 행·DB SENT 영수증 일치, 프록시 종료, reverse는 8080만 유지 |
+| 증거 대조·스크립트 검사 | `verify-outbox-evidence.py` 5가지 PASS, capture 스크립트 bash 문법·git diff 검사 PASS |
+
+Room instrumentation 8개는 파일 DB 재열기/같은 필드 보존/SENDING 복구, 계정·방·ID 복합키 격리, 24개 동시 retry 중 단일 claim, 20개 메시지의 중복 수락·늦은 실패 경쟁, process-store 초기화 반복 시 살아 있는 SENDING 유지, snapshot의 자신의 행만 대조, 다른 DB 연결에서 enqueue commit 확인, 취소된 retry transaction rollback을 검사했다. 임시 DB만 제거했고 실제 앱 데이터에는 `pm clear`/삭제를 사용하지 않았다.
+
+수동 복구 메시지 `persist3`의 client ID는 `0041aefa-9315-4ac3-adf3-31f526ec98d8`, 서버 ID는 `beaa6e5e-fc23-4954-8529-0570f71fe64c`, sequence는 3이다. hard kill의 `kill3`는 client ID `e69ac4b7-69d4-478e-b2fe-b6e6f544b957`, 서버 ID `c6b63416-4e9e-4722-9bdd-e5809cb3ddd9`, sequence 4다. 모두 로컬 테스트 데이터다.
+
+### 구현 후 확인한 경계
+
+- 로컬 commit 전에는 POST가 없다. 저장 실패 시 입력을 유지한다. 로컬 transaction과 원격 append는 하나의 transaction이 아니다.
+- DB failure 갱신은 정확한 계정·방·ID의 SENDING/serverId 없음만 대상으로 한다. SENT receipt를 늦은 HTTP 오류가 되돌릴 수 없다.
+- 계정 변경 뒤 이전 HTTP 결과도 원래 scope의 DB에 저장한다. generation 검사가 새 계정 화면 갱신을 막는다. Room의 오래된 UNKNOWN emission도 현재 수락 행을 되돌리거나 중복 행을 만들지 않는다.
+- 전체 SENDING 초기화는 프로세스당 한 번이다. reconnect/계정 전환은 살아 있는 요청을 복구 대상으로 취급하지 않는다. 정상 ViewModel 취소는 guarded UNKNOWN 정리를 시도하지만 hard kill은 다음 실행의 복구가 담당한다.
+- 완료 receipt는 DB에 유지하되 서버 snapshot에 없는 과거 기록을 현재 history로 만들지 않는다. 현재 수신 전체 캐시는 아직 Room에 저장하지 않는다.
+
+### 검증 자동화에서 실패 후 해결
+
+실제 hard-kill 검증의 첫 cold start에서 UIAutomator가 `null root`를 반환해 전송을 시작하지 못했다. 초기 묶음 명령이 실패 뒤에도 계속돼 유효하지 않은 캡처가 생겼다. 실패 즉시 중단하도록 바꾸고, 안정된 연결 화면을 먼저 확인한 뒤 별도의 `*-final` 증거로 다시 검증했다. 마지막 기본 모드의 첫 XML도 일부 노드만 있어 증거 대조가 실패했으며, 안정된 현재 화면을 재관찰해 전체 대조를 통과시켰다. 이 실패한 초기 캡처를 통과 근거로 사용하지 않았다.
+
+### 근거와 남은 범위
+
+`evidence/outbox/verification.log`, `device-verification.log`, proxy/app 로그, UI XML/PNG, history JSON, 멈춘 프로세스의 DB/WAL snapshot을 로컬에 보관했다. JUnit XML·lint 보고서는 각 모듈 `build`에 있다. 실제 DB와 증거·로컬 SDK 설정·빌드 결과는 공개 Git에서 제외한다. `app/schemas/dev.chatlab.OutboxDatabase/1.json`은 DB 내용이 없는 버전 1 schema이며 소스와 함께 관리한다.
+
+```bash
+python3 scripts/verify-outbox-evidence.py
+```
+
+실기기·두 Android 동시 실행·Android UI instrumentation·release 빌드·실제 무선망 단절·디스크 용량 부족/손상 주입·DB migration 변경 검사는 미실행이다. 새 프로세스/동일 DB와 실제 Room instrumentation은 검증했다. selected 테스트 신원은 기존처럼 Alice로 시작하며, 계정별 outbox 기록은 보존된다. 서버 DB가 없어 서버 재시작 뒤 idempotency 기록·sequence가 사라지는 한계는 그대로다.
+
+[15–20분 실습](OUTBOX_EXERCISE.md)은 예상부터 적고 hard kill을 직접 재현한 뒤 본문 불일치 수락 테스트 하나를 사용자가 작성하도록 구성했다. 힌트·해설은 접어 두었고 학습용으로 구현을 망가뜨리지 않았다. 이후 구현을 자동 진행하지 않는다. 다음 한 단위는 수신 기록도 Room 기준으로 통합하는 것이며, 그 다음 서버 cursor 과거 페이징·실시간 중복/누락/스크롤 앵커를 검증한다. Paging3/RemoteMediator는 이번에 추가하지 않았다.

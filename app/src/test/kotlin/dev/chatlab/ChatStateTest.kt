@@ -69,4 +69,21 @@ class ChatStateTest {
         val result = recordSendError(accepted, "client-1", SendStatus.UNKNOWN, "retry timeout")
         assertEquals(accepted, result); assertEquals(1, result.messages.size)
     }
+    @Test fun staleOutboxEmissionCannotUndoLiveAcceptance() {
+        val accepted = mergeMessage(emptyList(), message)
+        val restored = listOf(MessageRow("client-1", "alice", "hello", status = SendStatus.UNKNOWN))
+        assertEquals(accepted, mergeOutbox(accepted, restored))
+    }
+    @Test fun storedSentReceiptIsNotInventedAsCurrentServerHistory() {
+        val sent = mergeMessage(emptyList(), message)
+        assertTrue(mergeOutbox(emptyList(), sent).isEmpty())
+        val pending = MessageRow("pending", "alice", "retry later", status = SendStatus.UNKNOWN)
+        assertEquals(listOf(pending), mergeOutbox(emptyList(), sent + pending))
+    }
+    @Test fun sameClientIdInAnotherRoomIsNotMergedOrRetried() {
+        val otherRoom = MessageRow("client-1", "alice", "other", status = SendStatus.UNKNOWN, roomId = "other")
+        val result = mergeMessage(listOf(otherRoom), message)
+        assertEquals(2, result.size)
+        assertNull(retryRequest(ChatState(connected = true, messages = listOf(otherRoom)), "client-1"))
+    }
 }

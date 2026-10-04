@@ -13,19 +13,27 @@ enum class LabMode(val port: Int, val label: String) {
     DIRECT(8080, ""), BOTH_LOST(8081, "HTTP + WS 수락 알림 유실 실험"), HTTP_LOST(8082, "HTTP만 유실 · WS 수락 확인 실험");
 }
 data class MessageRow(val clientMessageId: String, val senderId: String, val text: String,
-    val serverId: String? = null, val sequence: Long? = null, val status: SendStatus = SendStatus.SENDING)
+    val serverId: String? = null, val sequence: Long? = null, val status: SendStatus = SendStatus.SENDING, val roomId: String = "demo")
 data class UiError(val message: String, val clientMessageId: String? = null)
 data class ChatState(val user: String = "alice", val connection: String = "연결 끊김", val connected: Boolean = false,
-    val messages: List<MessageRow> = emptyList(), val error: UiError? = null, val labMode: LabMode = LabMode.DIRECT)
+    val messages: List<MessageRow> = emptyList(), val error: UiError? = null, val labMode: LabMode = LabMode.DIRECT,
+    val roomId: String = "demo", val outboxReady: Boolean = false, val queueing: Boolean = false, val lastQueuedId: String? = null)
 
 fun mergeMessage(rows: List<MessageRow>, message: Message): List<MessageRow> {
-    val accepted = MessageRow(message.clientMessageId, message.senderId, message.text, message.id, message.sequence, SendStatus.SENT)
-    return (rows.filterNot { it.serverId == message.id || (it.senderId == message.senderId && it.clientMessageId == message.clientMessageId) } + accepted)
+    val accepted = MessageRow(message.clientMessageId, message.senderId, message.text, message.id, message.sequence, SendStatus.SENT, message.roomId)
+    return (rows.filterNot { it.serverId == message.id || (it.roomId == message.roomId && it.senderId == message.senderId && it.clientMessageId == message.clientMessageId) } + accepted)
         .sortedWith(compareBy<MessageRow> { it.sequence ?: Long.MAX_VALUE }.thenBy { it.clientMessageId })
 }
 fun mergeSnapshot(rows: List<MessageRow>, snapshot: List<Message>): List<MessageRow> {
     val unresolved = rows.filter { it.serverId == null }
     return snapshot.fold(unresolved, ::mergeMessage)
+}
+// Confirmed rows describe the current server. Stored SENT receipts alone are not current history.
+fun mergeOutbox(rows: List<MessageRow>, stored: List<MessageRow>): List<MessageRow> {
+    val confirmed = rows.filter { it.serverId != null }
+    val keys = confirmed.map { Triple(it.roomId, it.senderId, it.clientMessageId) }.toSet()
+    return (confirmed + stored.filter { it.status != SendStatus.SENT && Triple(it.roomId, it.senderId, it.clientMessageId) !in keys })
+        .sortedWith(compareBy<MessageRow> { it.sequence ?: Long.MAX_VALUE }.thenBy { it.clientMessageId })
 }
 // A late failed POST must not undo a success already observed through the WebSocket echo.
 fun markUnconfirmed(rows: List<MessageRow>, id: String, status: SendStatus): List<MessageRow> =
@@ -43,6 +51,6 @@ fun recordSendError(state: ChatState, id: String, status: SendStatus, reason: St
 fun retryRequest(state: ChatState, id: String): SendMessage? {
     if (!state.connected) return null
     val row = state.messages.firstOrNull { it.senderId == state.user && it.clientMessageId == id
-        && it.status == SendStatus.UNKNOWN && it.serverId == null } ?: return null
+        && it.roomId == state.roomId && it.status == SendStatus.UNKNOWN && it.serverId == null } ?: return null
     return SendMessage(row.clientMessageId, row.text)
 }

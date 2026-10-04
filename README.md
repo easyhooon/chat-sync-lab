@@ -2,13 +2,16 @@
 
 Kotlin 개발자를 위한 작은 실시간 채팅 학습 프로젝트. **Ktor 서버 + Android Compose/Ktor Client(OkHttp 엔진)**로 Alice/Bob 두 테스트 신원이 한 방에서 텍스트를 주고받는다.
 
-첫 목표는 실제 네트워크 경로와 메시지 정합성을 관찰하는 것이다. 서버 하나와 Android app 하나로 구성하며 영속 DB·실제 인증·자동 재연결·읽음 기능은 아직 없다. 서버는 `127.0.0.1:8080`에만 바인딩한다.
+첫 목표는 실제 네트워크 경로와 메시지 정합성을 관찰하는 것이다. 서버 하나와 Android app 하나로 구성한다. Android는 **Room outbox**로 송신 의도와 수락 영수증을 보존하며, 서버는 계속 메모리다. 실제 인증·자동 재전송/재연결·읽음 기능은 아직 없다. 서버는 `127.0.0.1:8080`에만 바인딩한다.
 
 - [범위·화면 상태·JSON 계약](SCOPE.md)
 - [Android 관점으로 읽는 데이터 경로와 실패 시나리오](STUDY_GUIDE.md)
 - [실제 검증 결과와 한계](VERIFICATION.md)
+- [내가 직접 예상·재현·테스트하는 15–20분 실습](OUTBOX_EXERCISE.md)
 
 두 번째 학습 단위는 **수락 알림을 못 받아 UNKNOWN인 메시지를 같은 ID로 수동 재시도**하는 것이다. 기본 앱/서버에는 실패 주입이 없다. [학습 안내의 두 번째 단위](STUDY_GUIDE.md#두-번째-학습-단위-timeout이-서버-기록을-지우지는-않는다)를 따라 별도 테스트 프록시와 debug 학습 모드로만 실행한다.
+
+세 번째 단위는 **프로세스 종료 뒤에도 같은 ID·본문·계정·방·상태를 복구**하는 Room outbox다. 로컬 저장 완료 뒤에만 POST하며, 새 프로세스의 남은 SENDING은 UNKNOWN으로 복구한다. 자동 재전송하지 않는다. [Room의 실패 경계와 다음 캐시·페이징 단계](STUDY_GUIDE.md#세-번째-학습-단위-room-outbox와-프로세스-종료)를 읽으며 실제 종료/재실행을 따라할 수 있다.
 
 ## 실행
 
@@ -22,6 +25,12 @@ sdk.dir=/absolute/path/to/Android/sdk
 
 ```bash
 ./gradlew :server:test :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
+```
+
+관찰한 에뮬레이터 한 개를 실행한 뒤 실제 Room DB 검사를 추가로 실행한다. 테스트는 임시 DB만 만들고 제거하며 앱의 outbox 데이터는 지우지 않는다.
+
+```bash
+./gradlew :app:connectedDebugAndroidTest
 ```
 
 터미널 하나에서 서버를 유지한다.
@@ -70,7 +79,7 @@ bash scripts/idempotency-demo.sh
 ## 폴더
 
 - `server`: 신원·방 검사, 메모리 store, HTTP/WS, 서버 테스트와 Bob peer.
-- `app`: 화면, Ktor Client, 상태 병합과 오류 표시 테스트.
+- `app`: 화면, Ktor Client, Room outbox/버전 1 schema, 상태 병합·실제 DB 테스트.
 - `scripts`: 로컬 재현 실험·검증 증거 대조.
 - `evidence`(Git 제외): 이 Mac에서 만든 화면·로그·history·빌드 증거.
 
