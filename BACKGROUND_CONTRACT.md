@@ -1,6 +1,6 @@
 # 전경 소켓과 배경 Push의 경계
 
-전경 자동 after 복구와 Room durable hint를 구현했다. 실제 Firebase Messaging 25.1.3의 FID 등록/service·WorkManager 수신 경로도 컴파일하지만 기본 opt-in은 꺼져 있다. 프로젝트·테스트 기기·발송 경로가 미지정이므로 실제 FCM 전달은 검증하지 않았다. [등록 계약과 CLI 절차](FCM_SETUP.md)를 따른다.
+전경 자동 after 복구와 Room durable hint를 구현했다. 실제 Firebase Messaging 25.1.3의 FID 등록/service·WorkManager 수신 경로도 컴파일하지만 기본 opt-in은 꺼져 있다. 사용자 승인 후 전용 프로젝트/앱을 등록하고 Alice 단일 FID의 실제 배경 data 전달·새 프로세스 HTTP 복구를 검증했다. [등록 계약과 CLI 절차](FCM_SETUP.md)를 따른다.
 
 ## 현재 소유권
 
@@ -39,8 +39,8 @@ before는 가장 오래된 탐색 경계 이전이다. after는 이미 설정한
 
 테스트 payload는 data-only catch_up hint다. service의 제한된 처리 시간에는 Room 저장과 worker 예약만 한다. worker는 HTTP를 사용하며 소켓을 열지 않는다. unique APPEND_OR_REPLACE chain은 작업 종료 경계에 들어온 새 hint도 후속 실행하도록 한다. 같은 힌트가 여러 작업을 예약할 수 있지만 Room에서 target·본문은 중복 병합한다. 최대4회 시도 후 실패하며 이후 전경 복귀/수동 reconnect로 계속할 수 있다.
 
-알림 허용 여부는 동기화와 분리한다. 실제 API34 기기 검사에서 자신의 앱 알림 권한이 거절된 상태로 hint 저장/target 유지와 알림 미표시를 확인했다. 알림 허용 UX·실제 FCM 배경 전달·WorkManager 외부 수신 end-to-end는 미실행이다. 알림 클릭은 UI 계정을 임의 전환하지 않는다.
+알림 허용 여부는 동기화와 분리한다. 실제 API34 기기 검사에서 자신의 앱 알림 권한이 거절된 상태로 hint 저장/target 유지와 알림 미표시를 확인했다. 알림 허용 UX는 미실행이다. 실제 FCM 배경 data 전달·WorkManager HTTP 복구는 승인된 emulator Alice에서 확인했다. 알림 클릭은 UI 계정을 임의 전환하지 않는다.
 
-OS process kill과 사용자 force-stop은 다르다. force-stop 뒤 사용자가 앱을 다시 열기 전 Push wake-up에 의존하지 않는다. 이번 force-stop은 로컬 cursor 복구 검증이다. OS kill 후 실제 전달·배터리/제조사 정책은 검증하지 않았다. [Firebase 수신 설명](https://firebase.google.com/docs/cloud-messaging/android/receive-messages)을 참고한다.
+OS process kill과 사용자 force-stop은 다르다. force-stop 뒤 사용자가 앱을 다시 열기 전 Push wake-up에 의존하지 않는다. 이번 force-stop은 로컬 cursor 복구 검증이다. 일반 am kill 뒤 stopped=false인 새 배경 프로세스 전달은 확인했다. 실제 OS OOM·Doze·배터리/제조사 정책은 검증하지 않았다. [Firebase 수신 설명](https://firebase.google.com/docs/cloud-messaging/android/receive-messages)을 참고한다.
 
-프로젝트 선택·dev.chatlab 등록 대상·지정 기기·승인된 sender가 확정되기 전 외부 Firebase 등록/전송을 실행하지 않는다. 기존 CLI 로그인은 읽기 전용 목록 확인에만 사용했다. 다른 앱의 설정이나 자격증명을 재사용하지 않는다.
+승인된 전용 프로젝트/dev.chatlab/emulator Alice를 사용했다. 기존 CLI와 동일 principal의 기존 gcloud 권한으로 단기 테스트만 수행했으며 다른 앱 설정·서비스계정 키·지속 sender credential을 구성하지 않았다. 추가 권한/키/지속 설정은 별도 승인을 받는다.

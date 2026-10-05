@@ -248,6 +248,6 @@ SyncCursor의 base/contiguousThrough/requestedThrough는 계정·방·서버 실
 
 ForegroundChatSession은 WS bootstrap commit 뒤 공통 SyncCoordinator를 실행한다. WS 이벤트는 HTTP를 기다리지 않고 같은 캐시에 저장한다. 계정·방 Mutex는 중복 sync를 직렬화하지만 Room의 immutable key 검사가 늦은 응답과 중복을 처리한다. commit된 페이지는 프로세스 종료 뒤 남고 다음 실행은 해당 contiguous부터 재개한다. 배경/계정 전환은 전경 job을 취소하고 generation이 새 UI로의 반영을 막는다.
 
-FCM은 기록 자체를 보장하는 저장소가 아니다. 최신 Android SDK는 FID 등록 모드의 register/onRegistered를 제공한다. FIS ID와 FCM 등록 receipt는 다르며 SDK callback이 확인한 receipt만 private binding에 저장한다. prepared service는 독립 boundAccount로 hint를 검증하고 Room에 target을 남긴 뒤 worker에 HTTP 복구를 맡긴다. worker는 WS를 열지 않는다. 기본 SDK 자동 초기화/등록은 꺼져 있고 [프로젝트·CLI 선택](FCM_SETUP.md)이 필요하다. 실제 외부 전달은 아직 검사하지 않았다.
+FCM은 기록 자체를 보장하는 저장소가 아니다. 최신 Android SDK는 FID 등록 모드의 register/onRegistered를 제공한다. FIS ID와 FCM 등록 receipt는 다르며 SDK callback이 확인한 receipt만 private binding에 저장한다. prepared service는 독립 boundAccount로 hint를 검증하고 Room에 target을 남긴 뒤 worker에 HTTP 복구를 맡긴다. worker는 WS를 열지 않는다. 기본 SDK 자동 초기화/등록은 꺼져 있고 [프로젝트·CLI 선택](FCM_SETUP.md)이 필요하다. 승인 후 emulator Alice의 실제 FID 등록/새 배경 프로세스 data 수신/HTTP 복구를 확인했다. 기본 opt-in은 계속false이며 지속 backend sender는 없다.
 
 이번 실제 검증은 실패한 after105에서 새 프로세스가 이어받고, 복구 중 먼저 받은 #206까지 합쳐 #66–#206의141개가 모두 일치하는 것을 확인한다. base 이전65개는 before 조회 대상이다. 이전 메모리 서버 실행의 사라진 기록이나 서버 영속성을 복구했다고 해석하지 않는다.

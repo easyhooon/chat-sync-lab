@@ -80,7 +80,7 @@ class MessageCacheStore(private val database: OutboxDatabase, private val outbox
 
     suspend fun importLatestPage(owner: String, room: String, page: History) {
         validatePage(room, page)
-        require(page.highWatermark == (page.messages.lastOrNull()?.sequence ?: 0))
+        require(page.highWatermark == (page.messages.lastOrNull()?.sequence ?: 0L))
         database.withTransaction {
             ensureSession(owner, room, page.serverInstanceId)
             initializeSync(owner, room, page)

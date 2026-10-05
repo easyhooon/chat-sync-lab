@@ -34,13 +34,23 @@ class FcmBindingStore(context: Context, preferencesName: String = "chat-fcm-bind
 class FcmRegistrationController(private val context: Context, private val binding: FcmBindingStore) {
     fun registerForApprovedLocalTest(owner: String) {
         check(BuildConfig.DEBUG && BuildConfig.CHAT_FCM_ENABLED) { "FCM local opt-in is disabled" }
-        val options = requireNotNull(FirebaseOptions.fromResource(context)) { "Approved Firebase configuration missing" }
         binding.bindForRegistration(owner)
-        if (FirebaseApp.getApps(context).none { it.name == FirebaseApp.DEFAULT_APP_NAME }) FirebaseApp.initializeApp(context, options)
+        initializeConfiguredFirebase(context)
         FirebaseMessaging.getInstance().register().addOnCompleteListener { task ->
             // Task success triggers onRegistered separately; never declare receipt success here.
-            if (!task.isSuccessful) android.util.Log.w("ChatLab", "FCM registration failed; receipt remains unconfirmed")
+            if (task.isSuccessful) android.util.Log.i("ChatLab", "FCM register Task completed; SDK callback confirms receipt separately")
+            else {
+                val safeCodes = setOf("SERVICE_NOT_AVAILABLE", "AUTHENTICATION_FAILED", "INVALID_SENDER", "MISSING_INSTANCEID_SERVICE", "TOO_MANY_REGISTRATIONS", "FID_ALREADY_USED")
+                val code = task.exception?.message?.takeIf { it in safeCodes } ?: "UNCLASSIFIED"
+                android.util.Log.w("ChatLab", "FCM registration failed code=$code; receipt remains unconfirmed")
+            }
         }
+    }
+}
+internal fun initializeConfiguredFirebase(context: Context) {
+    check(BuildConfig.CHAT_FCM_ENABLED)
+    if (FirebaseApp.getApps(context).none { it.name == FirebaseApp.DEFAULT_APP_NAME }) {
+        FirebaseApp.initializeApp(context, requireNotNull(FirebaseOptions.fromResource(context)) { "Approved Firebase configuration missing" })
     }
 }
 fun parseFcmHint(data: Map<String, String>): PushEnvelope {

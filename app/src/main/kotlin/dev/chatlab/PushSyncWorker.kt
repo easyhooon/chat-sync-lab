@@ -25,7 +25,8 @@ class PushSyncWorker(context: Context, parameters: WorkerParameters) : Coroutine
         // The local test binding is independent of whichever account the UI currently displays.
         if (app.fcmBinding.confirmed()?.ownerId != owner) return Result.failure()
         return try {
-            app.repository.sync.refresh(owner, room, 8080) // No background WebSocket.
+            val synced = app.repository.sync.refresh(owner, room, 8080) // No background WebSocket.
+            android.util.Log.i("ChatLab", "PUSH_SYNC_COMPLETE owner=$owner confirmed=${synced.contiguousThrough} target=${synced.requestedThrough}")
             Result.success()
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (_: Exception) { if (runAttemptCount < 3) Result.retry() else Result.failure() }

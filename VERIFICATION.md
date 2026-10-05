@@ -287,3 +287,52 @@ CHAT_EVIDENCE_GROUP=catch-up bash scripts/capture-outbox-db.sh <serial> <label>
 이 작업의 loopback 서버·프록시·read-only AVD만 종료한다. 다음 실행은 [실습](CATCH_UP_EXERCISE.md)의 새 합성 fixture로 재현한다. 종료한 read-only AVD의 앱 데이터가 다음 실행에 남는다고 주장하지 않는다.
 
 실제 FCM 프로젝트 설정/앱 등록/SDK onRegistered/배경 data delivery/알림 허용 UX/외부 sender/OS kill 후 wake-up은 미실행이다. 실기기·두 Android 채팅·release APK·서버 영속 DB·자동 reconnect 백오프도 미실행이다. 프로젝트 생성/선택·dev.chatlab 등록·지정 기기/신원·발송 경로 승인을 기다리며 준비된 FID 경로로 실제 배경 수신을 다음 한 가지로 검증한다. 메모리 서버와 로컬 테스트 헤더의 한계는 그대로다.
+
+## 승인 후 FCM 실제 연결 — 2026-10-05 UTC
+
+사용자가 전용 Firebase 프로젝트/dev.chatlab 등록/emulator Alice 테스트를 승인한 뒤 진행했다. checkout addcc7e/main clean을 확인하고 기존 CLI 로그인·35프로젝트·전용 프로젝트 없음·실행 기기 없음을 관찰했다. 고유 ID로 프로젝트 한 번 생성 후 같은 프로젝트에 Android 앱 하나를 등록했다. 생성 요청을 중복 재시도하지 않았다. projectId/appId는 ignored local-firebase/project.json에 기록한다.
+
+| 검사 | 실제 결과 |
+|---|---|
+| 생성/설정 | 프로젝트 생성 성공, Android dev.chatlab 등록 성공, 정확한 project/package/appId의 기본 client 설정을 app/google-services.json에 저장. 기본 client API key 항목1개 포함, 내용 미출력. 파일 권한600/Git 제외 확인 |
+| 플랫폼 초기화 | 기본 Firebase Admin SDK 서비스계정1개 자동 생성 확인. 해당 계정의 키 생성·다운로드·사용은 없음 |
+| 결제/API/권한 | 읽기 전용 조회 billingEnabled=false, fcm.googleapis.com ENABLED, 기존 동일 principal의 cloudmessaging.messages.create 확인. 별도 API 활성화·IAM 변경·새 OAuth 로그인/scope·ADC/지속 sender 설정 없음 |
+| 실제 SDK 등록 | opt-in Messaging25.1.3 register Task 완료(23:58:02.076 KST)와 SDK onRegistered(02.082)를 구분. private receipt의 Alice/선택 프로젝트/등록시각/FID 존재 확인. FIS.getId를 등록 완료로 계산하지 않음. FID/토큰 미출력·증거에 저장하지 않음 |
+| 실제 단일 전송 | 동일 기존 계정의 단기 인증을 메모리에만 사용. approved emulator Alice SDK FID 하나에 high priority/data-only/TTL60초/catch_up through25 한 건. HTTP200 수락, target token/topic/condition 없음. 서버 지속 sender 자격증명 미설정 |
+| process 경계 | 빈 서버 baseline0 연결 → 홈/PROCESS_BACKGROUND socketStopped → 일반 am kill, PID8804 없음/stopped=false 관찰. force-stop 상태에서 수신 시도한 것이 아님 |
+| 실제 배경 callback | 서버에25개를 추가한 후 전송. 새 PID9128에서 FCM_HINT_RECORDED owner=alice through25(00:05:07.032 KST), PUSH_SYNC_COMPLETE confirmed25/target25(07.308). Activity/PROCESS_FOREGROUND/WS_START 없음 |
+| 실제 DB 정합성 | before DB cursor(0,0,0)/캐시0 → background DB cursor(0,25,25)/캐시25/내구성 hint25. 서버 전체 #1–#25의 서버ID/clientID/본문/sequence/run/sender 일치. Alice 이외 owner0 |
+| 최종 빌드/회귀 | opt-in APK 성공. 기본 비활성 빌드 서버17/JVM8 통과, debug APK/lint 성공. API34 전용 serial 전체 Android43개 통과(24초). 기존42 + 빈 bootstrap 기준0/catch-up 회귀1 |
+| 증거 | verify-fcm-evidence.py 3PASS. 이전 catch-up 증거 대조5PASS도 유지. Python·bash 문법/git diff 검사 |
+
+### 발견한 실패와 수정
+
+- 실제 빈 서버 최초 연결에서 importLatestPage의 highWatermark 검증이 실패했다. nullable Long의 fallback이 Int0이라 equality가 실패했다. fallback을0L로 고쳤고 실제 빈 bootstrap0 성공을 확인했다. 추가 DB 회귀 검사는 빈 기준0 뒤 최신 #6–#25 수신·after 복구가 #1–#25를 모두 저장하는 것을 확인한다.
+- Firebase 자동 provider를 제거한 prepared 앱은 새 배경 프로세스에서도 SDK 초기화가 필요했다. 승인된 opt-in binding이 있을 때 Application에서 동일 configured FirebaseApp을 초기화하도록 보강했다. auto-init은false이며 기본 빌드는 초기화하지 않는다. 실제 일반 process kill 후 새 background callback/HTTP worker로 검증했다.
+- 첫 읽기 전용 Python 감사는 설치된 Python의 기본 CA 경로 문제로 CERTIFICATE_VERIFY_FAILED였다. 기존 시스템 /etc/ssl/cert.pem으로 엄격한 TLS 검증을 유지해 성공했다. 인증서 검증 우회·새 인증서/시스템 도구 설치는 없다.
+
+### 안전한 자료와 남은 범위
+
+기본 client 설정은 승인된 앱 등록 흐름의 결과이며 서버 발송 개인키가 아니다. Firebase CLI의 공식 Node 모듈 호출 방식에서 logger를 silent로 두고 설정을 직접 ignored 파일에 저장했다. 설정 내용/키를 stdout이나 debug 파일에 출력하지 않았다. 기존 gcloud 활성 계정과 Firebase CLI principal은 비교 결과만 기록하고 이메일·OAuth token을 출력/저장하지 않았다. 단기 인증으로 지정 Alice에만 요청했으며 새 서비스계정 키/추가 발송 역할/새 scope/ADC 설정을 만들지 않았다. 프로젝트/API의 기존 상태를 읽은 다음 전송했다.
+
+ignored evidence/fcm의 configuration-summary/project-audit/registration-summary/send-summary/background-boundary/background-summary, Android 안전한 로그, before/background DB+WAL, history25, opt-in/default 빌드·room-final43 결과가 근거다. 실제 FID는 private 앱 preferences에만 있었고 증거 파일에 복사하지 않았다. scripts/verify-fcm-evidence.py는 credential/FID/config를 읽지 않고 sanitized summary와 DB만 대조한다.
+
+```bash
+python3 scripts/verify-fcm-evidence.py
+```
+
+검증 후 자신의 loopback 서버/read-only AVD만 종료한다. 새 Firebase 프로젝트/Android 등록/로컬 client 설정은 유지한다. 종료한 read-only AVD의 데이터/이번 FID가 다음 실행에서도 유지된다고 주장하지 않는다. 다음 실행은 [FCM_SETUP](FCM_SETUP.md)의 새 SDK 등록부터 수행한다.
+
+이번 HTTP200은 전달의 단독 증거가 아니다. 실제 SDK callback·배경 PID·worker 로그·서버/Room 대조를 함께 확인했다. 일반 am kill 검증을 실제 OS OOM·Doze/배터리 정책·실기기 보장으로 해석하지 않는다. 알림 허용 UX/notification payload/force-stop wake-up/FID rotation·로그아웃/지속 서버 registration·sender는 미실행이다. next: 등록 갱신·해제 시 boundAccount가 이전 계정 수신을 허용하지 않는지를 검증한다. 서버는 계속 메모리이며 X-Test-User는 제품 인증이 아니다.
+
+### migration 참고로 공유할 때의 범위
+
+위 결과는 새 전용 프로젝트/신규 Android 등록의 FID 경로 검증이다. 기존 운영서비스 token 저장소·legacy client 공존·운영 sender 전환을 검사하지 않았다. Messaging25.1.3/onRegistered receipt/fid 단일 전송/실제 배경 복구는 통과했다. private receipt 갱신·synthetic rebind 무효화는 검사했으나 실제 식별자 rotation/logout의 SDK unregister·서버 연결 해제·운영 credential은 미구현/미검증이다. [FCM_SETUP의 구현/후속 표](FCM_SETUP.md#서버-개발자에게-공유할-때-신규-실험과-migration의-차이)를 함께 공유한다. 서비스계정 JSON/개인키 없이 기존 계정 단기 인증으로 테스트했으며 이를 지속 운영서버 인증 구성으로 설명하지 않는다.
+
+### 사용자가 요청한 verification-before-completion 기준의 마지막 재검증
+
+현재 수정본으로 전체 명령을 새로 실행했다. server:test/app:testDebugUnitTest/assembleDebug/lintDebug는 --rerun-tasks로58개 task 전부 실행하여30초 성공, 전용 serial의 전체 Android43개는31초 성공, 별도 FCM opt-in assemble/lint도10초 성공이다. 실패/오류/스킵은 각각0이며 lint는 오류0/경고20이다. 두 APK는 ignored evidence/fcm/apk에 권한600으로 보관했다. 실제 FCM 수신 증거는 앞의15:05 UTC 단일 승인 대상 테스트이며 이번 재검증에서 추가 발송·새 권한은 사용하지 않았다.
+
+빈 bootstrap 수정 전 조건을 잠깐 복원해 추가한 실제 기기 테스트만 실행했을 때1개/1개 실패, 원래 MessageCache.kt:83 IllegalArgumentException을 JUnit XML로 확인했다. finally에서 수정본을 복원한 뒤 전체43개 성공을 확인해 red→green을 검증했다. 최초 red 증거 수집기는 AGP 출력에 Tests1/1 completed가 있을 것으로 가정하여 중단됐고, Finished1tests 출력과 전체 XML을 확인해 집계했다. source는 중단 시에도 복원됐으며 실패 XML/원래 로그를 보존했다.
+
+fresh-build-final/fresh-room-final/fresh-optin-build-final 로그, red-green-summary와 empty-bootstrap-red-results, fresh-verification-summary.json이 최신 근거다. verify-fcm-evidence3PASS와 verify-catch-up-evidence5PASS도 다시 실행했다. 최신 source diff/민감 설정 제외를 확인한 뒤 일반 커밋/푸시한다.

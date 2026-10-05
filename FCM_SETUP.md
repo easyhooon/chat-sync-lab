@@ -1,43 +1,57 @@
-# FID 수신 연동 준비와 필요한 입력
+# FID 수신 연결과 로컬 실행
 
-현재 package ID는 dev.chatlab이고 Firebase 설정이 없다. 다른 개인/회사 앱의 설정을 찾거나 재사용하지 않았다. Messaging 25.1.3 프로젝트 의존성과 실제 onRegistered service를 컴파일하며, Firebase 자동 provider/auto-init/Analytics를 막고 기본 CHAT_FCM_ENABLED=false로 둔다. 현재 등록·FID 생성·외부 발송은 실행하지 않는다.
+전용 Firebase 프로젝트 생성·dev.chatlab 등록·채팅용 emulator-5554/Alice 테스트를 사용자 승인 후 실행했다. 실제 SDK onRegistered receipt, 단일 FID data 전송, 새 배경 프로세스의 콜백과 HTTP-only 복구까지 확인했다. 기본 빌드는 CHAT_FCM_ENABLED=false이며 외부 등록을 자동 시작하지 않는다.
 
-## 확인한 최신 계약 — 2026-10-05 UTC
+## 이번에 생성된 것과 보관 위치
 
-- Android [시작 안내](https://firebase.google.com/docs/cloud-messaging/android/get-started), [등록 관리](https://firebase.google.com/docs/cloud-messaging/manage-tokens): installation_id_enabled flag + register()와 SDK onRegistered(installationId) 성공 callback을 사용한다. FirebaseInstallations.getId()만 얻은 상태는 FCM 등록 완료가 아니다. register Task 성공만으로 앱의 receipt를 먼저 기록하지 않는다.
-- Android [릴리스](https://firebase.google.com/support/release-notes/android): FID API는 Messaging 25.1.0부터. 현재 25.1.3을 사용하고 실제 공식 AAR의 register/onRegistered public API를 javap로 확인했다. 앱 binding은 SDK callback에서만 FID·프로젝트·계정·등록시각을 앱 private preferences에 기록한다. ID를 로그/화면에 출력하지 않는다.
-- [REST Message](https://firebase.google.com/docs/reference/fcm/rest/v1/projects.messages)의 명시적 fid target을 사용한다. token/fid/topic/condition은 함께 지정하지 않는다. [Admin Java 릴리스](https://firebase.google.com/support/release-notes/admin/java)의 setFid는 9.10.0부터, 최신 9.11.0도 지원한다. 현재 서버는 HTTP v1 body serializer만 준비했고 Admin credential/SDK sender는 초기화하지 않았다. 선택한 Android SDK와 REST 계약이 FID를 지원하므로 legacy token fallback은 추가하지 않는다.
+- 새 전용 프로젝트를 한 번 생성하고 같은 프로젝트에 Android 앱 하나를 등록했다. 고유 projectId/appId는 ignored `local-firebase/project.json`에 기록했다. 다른 프로젝트를 재사용하지 않았다.
+- 앱 등록의 기본 client 설정에는 API key 항목1개가 포함됐다. `app/google-services.json`에 권한600으로 저장하고 package/project/appId를 검사했다. 파일 내용·API key·FID·OAuth token은 출력하지 않는다. app/src 하위 설정·local-firebase·build·evidence도 Git 제외다.
+- 프로젝트 초기화에 따라 기본 Firebase Admin SDK 서비스계정1개가 플랫폼에서 자동 생성됐다. 이 계정의 키 생성·다운로드·사용은 하지 않았다.
+- billingEnabled=false를 실제 읽기 전용 조회로 확인했다. 유료 요금제/결제 연결은 없다. FCM API는 이미 ENABLED이고 현재 계정에 cloudmessaging.messages.create 권한이 있다. 추가 API 활성화/IAM 변경/새 OAuth 로그인·scope/ADC 설정은 수행하지 않았다.
+- 기존 Firebase CLI15.10.0과 같은 principal의 기존 gcloud 활성 계정을 확인했다. 테스트 발송은 기존 계정의 단기 인증을 프로세스 메모리에서만 사용했다. 프로젝트 전체/Topic/Bob으로 보내지 않고 승인된 Alice의 실제 SDK FID 한 곳에 data-only 한 건을 보냈다. 발송/설정 스크립트는 ignored evidence/fcm에 있으며 자격증명을 포함하지 않는다.
 
-## 사용자에게 필요한 최소 입력
+## 최신 등록·발송 계약
 
-1. 사용자가 사용할 기존 Firebase 프로젝트 ID와 dev.chatlab 등록 여부. 없다면 Android 앱 등록도 별도 대상/승인 확인 후 진행한다.
-2. 합의한 지정 테스트 기기와 테스트 신원(Alice/Bob). Google Play services가 있는 기기가 필요하다. 테스트 신원 Chip 변경은 FCM binding 변경이 아니다.
-3. 해당 프로젝트의 승인된 발송 경로. 사용자 본인의 기존 sender로 발송하는지, 다른 허용 경로가 있는지 결정한다. 새 프로젝트·서비스계정·API key·OAuth·지속 접근을 생성하지 않는다.
-4. 프로젝트 선택 후 dev.chatlab용 설정 파일을 로컬 app/google-services.json에 직접 제공한다. 해당 파일은 Git ignore다. 채팅에 인증정보·token·FID·서비스계정 JSON을 붙여넣지 않는다.
+[Android 시작 안내](https://firebase.google.com/docs/cloud-messaging/android/get-started), [등록 관리](https://firebase.google.com/docs/cloud-messaging/manage-tokens)에 따라 installation_id_enabled flag + register() / SDK onRegistered(installationId)를 사용한다. FIS.getId 또는 register Task 완료만으로 등록 receipt를 만들지 않는다. SDK callback만 계정·프로젝트·FID·등록시각을 private preferences에 저장한다. Messaging25.1.3의 실제 public API도 확인했다. token fallback은 없다.
 
-설정·권한·지정 대상이 결정된 뒤에만 사용자가 승인한 로컬 빌드에서 -PchatFcmEnabled=true를 사용한다. 이 빌드는 로컬 google-services.json이 없으면 실패한다. 기본 빌드는 설정 없이 동작한다. 실제 등록 시작은 debug 실행의 명시적 fcm_test_account extra로 별도 opt-in하며, 현재 실행하지 않았다. 서버 upload/send 연결은 별도 승인 단계다.
+[REST Message](https://firebase.google.com/docs/reference/fcm/rest/v1/projects.messages)의 fid target만 지정한다. token/fid/topic/condition을 함께 보내지 않는다. [HTTP v1 인증](https://firebase.google.com/docs/cloud-messaging/send/v1-api)은 단기 OAuth 인증을 사용한다. 이번 테스트는 기존 권한만 사용했으며 서버에 지속 sender 자격증명을 설정하지 않았다. 서버의 body serializer는 순수 계약 코드다.
 
-## 수신·알림·동기화 경로
+## 다시 실행
 
-FCM data는 kind=catch_up, recipientId, roomId, serverInstanceId, throughSequence의 짧은 hint다. service는 확인된 등록의 boundAccount를 payload와 독립적으로 읽어 검증하고 Room에 durable hint만 짧게 저장한다. 이후 WorkManager의 계정·방별 unique chain이 공통 coordinator로 HTTP bootstrap/after를 수행한다. 배경 worker는 소켓을 열지 않는다. foreground WS/HTTP도 같은 transaction과 coordinator를 사용한다.
-
-notification+data는 배경에서 callback 진입이 다르므로 이 테스트 계약은 data-only를 사용한다. 자체 알림은 권한이 허용된 경우에만 표시하며, 거절해도 hint 저장/복귀 sync를 막지 않는다. 알림 클릭은 계정을 임의 전환하지 않고 현재 UI를 연다. WorkManager는 hint가 마지막 실행 경계에 도착해도 후속 실행이 있도록 APPEND_OR_REPLACE를 사용한다. 중복 payload는 Room에서 합치지만 여러 background 작업을 예약할 수 있다.
-
-force-stop은 사용자 재실행 전 수신/worker wake-up에 의존하지 않는다. OS process kill은 다른 경계이며 배터리/제조사 정책으로 전달을 보장하지 않는다. 이 설정 대기 중인 작업에서는 실제 FCM 수신·알림·OS kill 후 wake-up을 통과로 표시하지 않는다. 서버는 계속 메모리이고 제품 인증/내구성 있는 서버 registration 저장은 다음 범위다.
-
-## CLI로 준비할 수 있는 범위
-
-개인 Mac의 Firebase CLI 15.10.0과 기존 로그인 계정 1개를 읽기 전용으로 확인했다. `login:list`와 `projects:list`는 성공했고 접근 가능한 프로젝트가 35개다. 계정 이메일·인증정보·다른 앱 설정은 자료에 출력하지 않는다. [공식 CLI 안내](https://firebase.google.com/docs/cli)와 설치된 명령 도움말에서 아래 문법을 확인했다.
-
-프로젝트를 사용자가 지정한 뒤 먼저 앱을 조회한다. `$CHAT_FIREBASE_PROJECT`와 `$CHAT_FIREBASE_APP_ID`는 사용자가 선택한 실제 값으로 설정하며 현재 실행하지 않았다.
+프로젝트와 등록된 앱은 남아 있으므로 프로젝트/app 생성 명령을 다시 실행하지 않는다. 로컬 설정이 있으면 다음으로 opt-in debug APK를 만든다.
 
 ```bash
-firebase apps:list ANDROID --project "$CHAT_FIREBASE_PROJECT" --non-interactive
-# dev.chatlab이 없다면 Android 앱 등록 승인 후에만:
-firebase apps:create ANDROID "Chat Sync Lab" --package-name dev.chatlab --project "$CHAT_FIREBASE_PROJECT" --non-interactive
-# 조회/등록 결과의 정확한 appId로 로컬 ignored 파일에 저장:
-firebase apps:sdkconfig ANDROID "$CHAT_FIREBASE_APP_ID" --project "$CHAT_FIREBASE_PROJECT" --out app/google-services.json --non-interactive
 ./gradlew -PchatFcmEnabled=true :app:assembleDebug
+# 먼저 기기를 관찰하고 실제 선택한 serial로 설치한다.
+adb -s emulator-5554 install -r app/build/outputs/apk/debug/app-debug.apk
+adb -s emulator-5554 reverse tcp:8080 tcp:8080
+adb -s emulator-5554 shell am start -n dev.chatlab/.MainActivity --es fcm_test_account alice
 ```
 
-CLI 설치/새 로그인은 필요 없다. 프로젝트 선택·dev.chatlab 등록 대상·테스트 기기·발송 경로가 아직 확정되지 않아 위 명령으로 앱 생성·설정 다운로드·실제 등록을 수행하지 않았다. CLI 설정 다운로드는 인증키를 채팅에 붙여넣는 작업이 아니다. 기존 로그인 토큰이나 서비스계정 파일을 읽어 sender 자격증명으로 전용하지 않는다.
+실제 SDK callback을 확인하기 전 등록 완료라고 판단하지 않는다. 테스트 신원 Chip 변경은 FCM binding 변경이 아니다. approved binding이 있는 opt-in 앱은 새 배경 프로세스의 Application에서도 Firebase를 초기화하며 auto-init은 계속false다. 기본 빌드는 설정 파일이 로컬에 있어도 Google services plugin/SDK 초기화를 켜지 않는다. provider는 제거되어 있다.
+
+SDK 자동 provider/auto-init/Analytics를 막았으며 수동 register만 사용한다. 등록 Task 로그와 SDK callback 로그를 구분하고 실패 코드는 제한된 whitelist만 출력한다. FID를 화면/로그에 표시하지 않는다. read-only AVD 종료 후 기기 데이터/이번 FID를 다음 실행의 등록으로 취급하지 않는다. 새 실행은 다시 승인된 target의 SDK 등록이 필요하다.
+
+## 실제 검증한 수신 경로
+
+빈 서버의 baseline0을 저장하고 홈에서 PROCESS_BACKGROUND socketStopped를 확인했다. 일반 am kill 후 PID가 없어지고 stopped=false인 것을 관찰했다. server에25개를 추가한 뒤 Alice FID에 high-priority data-only hint를 한 번 전송했다. HTTP200 수락 다음에 새 배경 PID의 FCM_HINT_RECORDED와 PUSH_SYNC_COMPLETE를 관찰했다. Activity/WS 없이 cache1..25/confirmed25가 서버와 일치했다. [실제 검증 기록](VERIFICATION.md), `python3 scripts/verify-fcm-evidence.py`의3PASS가 근거다.
+
+service는 독립 boundAccount로 recipient/room/run/sequence를 검사하고 Room durable hint를 저장한 뒤 WorkManager에 HTTP 복구를 맡긴다. notification+data는 배경 진입 경로가 다르므로 이번 계약은 data-only다. 알림 허용 여부와 동기화를 분리한다. 알림 클릭은 UI 계정을 임의 전환하지 않는다. APPEND_OR_REPLACE는 작업 종료 경계의 새 hint도 후속 실행하도록 한다.
+
+force-stop 상태에서 수신을 검증한 것은 아니다. 실제 OS OOM·Doze·제조사 배터리 정책·실기기·알림 허용 UX·FID rotation/logout·지속 backend registration/sender는 미실행이다. 새 서비스계정/키/발송 권한/OAuth scope/지속 credential 설정이 필요하면 구체적 대상·권한·용도의 별도 승인을 먼저 받는다.
+
+## 서버 개발자에게 공유할 때: 신규 실험과 migration의 차이
+
+이번 프로젝트는 **신규 앱/프로젝트의 FID 경로 실험**이다. 기존 운영 token 저장소·구버전 앱·운영 sender를 이전하지 않았으므로 운영 token→FID migration 완료 근거로 사용하지 않는다. 아래 구현과 후속 확인을 구분한다.
+
+| 항목 | 이번 구현/실제 검증 | 운영 migration에서 추가로 확인할 것 |
+|---|---|---|
+| Android SDK | Messaging25.1.3, installation ID flag, register/onRegistered public API 컴파일·실제 callback 확인 | 구버전 fleet/Play services·단계별 SDK rollout·기존 token 등록 동작 |
+| 등록 완료 조건 | SDK onRegistered 뒤에만 private receipt 기록. FIS ID/Task 완료만으로 성공 처리하지 않음 | 서버 registration endpoint의 인증·계정/설치 binding·등록시각·중복/갱신·재등록 정책 |
+| 발송 target | REST 명시적 fid 단일 대상 실제 HTTP200+callback+Room 대조. server serializer 단위 검사 | 운영 sender/Admin SDK 버전·권한·성공/오류 해석·기존 registration 저장 schema |
+| legacy token 공존 | 구현/검증하지 않음. token fallback/onNewToken 경로 없음 | 구버전 token과 확인된 FID를 구분해 보관하고 대상 유형에 맞게 발송. 같은 요청에 fid/token을 함께 넣지 않음. deprecated/전환 호환 기간은 배포 시 공식 계약 재확인 |
+| 식별자 갱신 | callback이 private FID/시각을 갱신하는 저장 경로, synthetic 재등록 검사 | 실제 FID rotation·서버 upsert·오래된 ID/UNREGISTERED 정리·늦은 callback/등록 경쟁 |
+| 로그아웃/계정 연결 해제 | synthetic bind 변경은 이전 local receipt를 무효화. UI Chip과 binding은 독립 | 실제 auth logout hook·SDK unregister·서버 계정-설치 연결 해제·대기 worker/늦은 delivery가 이전 계정으로 새지 않는지 |
+| 서버 인증 | 기존 계정의 단기 인증으로 지정 emulator Alice만 테스트. 기본 생성 서비스계정의 JSON/개인키 미생성·미사용 | 운영 환경의 승인된 자격증명/최소 권한/운영 방식 선택. 실제 private credential 입력·업로드는 소유자가 수행하고 새 설정은 별도 action-time 승인 |
+
+[FID 등록 관리](https://firebase.google.com/docs/cloud-messaging/manage-tokens), [REST Message](https://firebase.google.com/docs/reference/fcm/rest/v1/projects.messages), [Admin Java 릴리스](https://firebase.google.com/support/release-notes/admin/java)를 전달 계약의 근거로 함께 공유한다. Admin Java setFid 지원은 문서에서 확인했지만 이 프로젝트는 Admin SDK를 설치/초기화하지 않았고 순수 REST body+단기 테스트만 사용했다.

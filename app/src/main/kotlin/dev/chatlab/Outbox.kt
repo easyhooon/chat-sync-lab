@@ -120,6 +120,9 @@ class ChatApplication : Application() {
     val localPushAdapter by lazy { LocalPushAdapter(repository) }
     override fun onCreate() {
         super.onCreate()
+        // The approved binding also initializes the SDK when a push starts a fresh background process.
+        // auto-init remains false; initialization does not claim a registration receipt.
+        if (BuildConfig.CHAT_FCM_ENABLED && fcmBinding.boundAccount() != null) initializeConfiguredFirebase(this)
         androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.addObserver(object : androidx.lifecycle.DefaultLifecycleObserver {
             override fun onStart(owner: androidx.lifecycle.LifecycleOwner) = foregroundSession.onForeground()
             override fun onStop(owner: androidx.lifecycle.LifecycleOwner) = foregroundSession.onBackground()

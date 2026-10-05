@@ -32,6 +32,24 @@ class CatchUpDatabaseTest {
     private fun http(handler: suspend MockRequestHandleScope.(io.ktor.client.request.HttpRequestData) -> HttpResponseData) =
         HttpClient(MockEngine { handler(it) }) { install(ContentNegotiation) { json() } }
 
+    @Test fun emptyBootstrapEstablishesZeroBaselineBeforeBackgroundMessages() = runBlocking {
+        val db=db();val cache=MessageCacheStore(db,OutboxStore(db))
+        val client=http { request ->
+            val after=request.url.parameters["after"]!!.toLong();val target=request.url.parameters["through"]!!.toLong()
+            respond(Json.encodeToString(AfterPage.serializer(),page(SyncCursor("alice","demo","run-A",0,after,target),minOf(after+20,target))),headers=headersOf(HttpHeaders.ContentType,"application/json"))
+        }
+        val repository=ChatRepository(OutboxStore(db),cache,client)
+        try {
+            cache.importLatestPage("alice","demo",History(emptyList(),"run-A","demo",null,true,0))
+            assertEquals(SyncCursor("alice","demo","run-A",0,0,0),cache.syncCursor("alice","demo","run-A"))
+            cache.importLatestPage("alice","demo",latest(6,25))
+            assertEquals(0L,cache.syncCursor("alice","demo","run-A")!!.contiguousThrough)
+            repository.sync.catchUp("alice","demo","run-A",8080)
+            assertEquals((1L..25L).toList(),rows(cache).map{it.sequence})
+            assertEquals(25L,cache.syncCursor("alice","demo","run-A")!!.contiguousThrough)
+        } finally {repository.close();db.close()}
+    }
+
     @Test fun earlyHighPushCannotEstablishBaselineOrSkipGapsInKnownRun() = runBlocking {
         val db=db(); val cache=MessageCacheStore(db,OutboxStore(db))
         try {

@@ -5,7 +5,7 @@
 - 테스트 신원 `alice`, `bob`; 대화방 `demo`; 텍스트 1–1000자. 실제 로그인·읽음·영상은 없다.
 - 화면: 테스트 신원 선택, 연결/기기 저장 상태, Paging 메시지 목록, 입력, 전송, UNKNOWN 수동 retry, 과거 조회/실패 retry/최신으로 이동.
 - 전송 상태: SENDING → SENT(서버 메모리 수락), FAILED(거절), UNKNOWN(응답 유실 가능). SENT는 영속 서버 저장·상대 수신·읽음을 뜻하지 않는다.
-- 서버는 `127.0.0.1:8080`만 listen한다. Android는 관찰한 serial의 adb reverse로 loopback에 연결한다. 외부 공개·방화벽 변경·유료 서비스는 없다. Firebase SDK는 기본 opt-in=false이며 프로젝트 설정/외부 등록/발송은 미실행이다.
+- 서버는 `127.0.0.1:8080`만 listen한다. Android는 관찰한 serial의 adb reverse로 loopback에 연결한다. 외부 공개·방화벽 변경·유료 서비스는 없다. Firebase SDK는 기본 opt-in=false이며 승인된 전용 프로젝트/앱/에뮬레이터 Alice에서만 실제 FID 등록·배경 data 수신을 검증했다.
 - `X-Test-User`는 누구나 흉내 낼 수 있는 로컬 개발 신원이다. HTTP와 WS 업그레이드 전에 신원 및 방 접근을 검사한다. 제품 인증을 대신하지 않는다.
 - 전경 WS는 Application/ProcessLifecycleOwner 소유다. Activity 회전은 연결을 끊지 않으며 배경에서는 WS job을 취소한다. 수동 reconnect는 있지만 백오프 자동 reconnect/retry는 없다.
 - UI 본문은 계정·방별 Room PagingSource만 읽는다. outbox 송신 상태만 transient 오류/retry 정책용 StateFlow에도 관찰한다. 네트워크 callback은 UI 목록을 직접 바꾸지 않는다.
@@ -80,4 +80,4 @@
 
 ## 이번 경계와 다음 한 가지
 
-[페이징](PAGING_CONTRACT.md), [복구](CATCH_UP_CONTRACT.md), [배경](BACKGROUND_CONTRACT.md) 계약을 따른다. before 과거 탐색과 after 누락 복구는 별도 키다. 높은 수신 번호가 연속 확인을 의미하지 않는다. Firebase Messaging25.1.3의 FID service·등록 receipt·HTTP-only worker·알림 권한 분기를 준비했고 기본 opt-in은 꺼져 있다. 실제 FCM 전달은 프로젝트/대상/sender 지정 후 다음 한 가지로 검증한다. 서버는 여전히 메모리이고 제품 인증은 없다.
+[페이징](PAGING_CONTRACT.md), [복구](CATCH_UP_CONTRACT.md), [배경](BACKGROUND_CONTRACT.md) 계약을 따른다. before 과거 탐색과 after 누락 복구는 별도 키다. 높은 수신 번호가 연속 확인을 의미하지 않는다. Firebase Messaging25.1.3의 FID service·등록 receipt·HTTP-only worker·알림 권한 분기를 준비했고 기본 opt-in은 꺼져 있다. 실제 FCM 전달은 승인된 emulator Alice 단일 FID와 기존 발송 권한으로 검증했다. 지속 sender와 backend registration은 아직 없다. 서버는 여전히 메모리이고 제품 인증은 없다.

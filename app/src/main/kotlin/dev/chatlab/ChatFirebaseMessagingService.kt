@@ -28,6 +28,7 @@ class ChatFirebaseMessagingService : FirebaseMessagingService() {
             val owner = requireNotNull(app.fcmBinding.confirmed()?.ownerId)
             val payload = parseFcmHint(message.data)
             runBlocking { withTimeout(2000) { app.localPushAdapter.receive(owner, payload) } }
+            Log.i("ChatLab", "FCM_HINT_RECORDED owner=$owner through=${payload.throughSequence}")
             // Only durable short ingestion runs in this callback. HTTP sync runs in WorkManager.
             app.pushScheduler.enqueue(owner, payload.roomId).result.get(3, TimeUnit.SECONDS)
             app.chatNotifications.showIfAllowed(owner)

@@ -22,9 +22,9 @@ Kotlin 개발자를 위한 작은 실시간 채팅 학습 프로젝트. **Ktor �
 
 네 번째 단위는 **수신 기록을 계정·방별 Room에 보존**하는 것입니다. HTTP history, WebSocket snapshot/event, POST 수락이 같은 저장 경로로 합쳐집니다. 당시 DB Flow 읽기는 아래 다섯 번째 단위의 Room Paging으로 확장했습니다. 빈 snapshot으로 과거 캐시를 지우지 않고, 서버 실행 UUID로 재시작 뒤 sequence 재사용을 구분합니다. [직접 예측하고 테스트하기](CACHE_EXERCISE.md)로 먼저 확인하세요.
 
-다섯 번째 단위는 **최신 20개 WS bootstrap + 배타적 before cursor + Room Paging**입니다. 과거 조회와 live 수신은 같은 캐시로 합치고, 실패한 과거 요청은 같은 cursor로 수동 재시도합니다. 전경 소켓은 Application의 ProcessLifecycleOwner가 관리하므로 Activity 재생성으로 끊기지 않습니다. 배경에서는 소켓을 닫습니다. 로컬 Push adapter 검사는 공통 저장 경로를 확인하며 실제 FCM 전달은 다음 설정 단계입니다.
+다섯 번째 단위는 **최신 20개 WS bootstrap + 배타적 before cursor + Room Paging**입니다. 과거 조회와 live 수신은 같은 캐시로 합치고, 실패한 과거 요청은 같은 cursor로 수동 재시도합니다. 전경 소켓은 Application의 ProcessLifecycleOwner가 관리하므로 Activity 재생성으로 끊기지 않습니다. 배경에서는 소켓을 닫습니다. 로컬 Push adapter 검사는 공통 저장 경로를 확인하며 실제 FCM 전달은 아래 여섯 번째 연결 검증까지 진행했습니다.
 
-여섯 번째 단위는 **기준점 이후 연속 확인 지점을 Room에 보존하고 after20개씩 누락을 자동 보충**합니다. 높은 Push/WS 번호가 먼저 도착해도 빈 구간을 건너뛰지 않습니다. 중단된 commit 지점부터 재실행하며 before 과거 탐색과 구분합니다. FID 기반 Messaging SDK/service/worker는 준비했고, 기본 빌드는 Firebase 등록을 실행하지 않습니다. 실제 프로젝트·기기·sender 선택은 [FCM 준비](FCM_SETUP.md)에 있습니다.
+여섯 번째 단위는 **기준점 이후 연속 확인 지점을 Room에 보존하고 after20개씩 누락을 자동 보충**합니다. 높은 Push/WS 번호가 먼저 도착해도 빈 구간을 건너뛰지 않습니다. 중단된 commit 지점부터 재실행하며 before 과거 탐색과 구분합니다. FID 기반 Messaging SDK/service/worker는 준비했고, 기본 빌드는 Firebase 등록을 실행하지 않습니다. 사용자 승인 후 전용 프로젝트/dev.chatlab을 등록하고 emulator Alice의 실제 FID 등록·배경 data 수신·HTTP 복구를 확인했습니다. 기본 빌드는 외부 등록을 켜지 않습니다. [FCM 실행](FCM_SETUP.md)에 설정 보관 위치와 경계를 남겼습니다.
 
 ## 실행
 
