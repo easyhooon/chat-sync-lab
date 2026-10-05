@@ -1,81 +1,74 @@
-# 첫 실행 단위
+# 현재 채팅 실행 범위
 
-## 네 번째 단위: 수신 기록의 Room 캐시
+독립 로컬 학습 프로젝트이며 서버 하나와 Android app 하나로 구성한다. Kotlin/Ktor 서버 + Compose/Ktor Client(OkHttp 엔진), Room outbox·수신 캐시·Paging을 사용한다. 서버/클라이언트는 JSON 계약으로 분리되어 있어 서버 프레임워크를 바꿔도 메시지 정합성 문제는 같다.
 
-- 화면 메시지는 계정·방별 Room Flow에서만 읽는다. HTTP history, WS snapshot/event, POST 수락은 같은 저장 경로에 합친다. 미확인 outbox도 같은 SQL projection에 포함한다.
-- 수신 캐시 삽입과 자신의 outbox SENT 수락은 한 로컬 transaction이다. 중복은 같은 행이며 동일 서버 ID의 다른 본문/sequence는 오류로 처리한다.
-- snapshot은 추가 병합이다. 빠진 기록을 삭제하지 않는다. 서버 실행 UUID `serverInstanceId`를 history·snapshot·message에 포함하며 `(계정, 방, 실행 UUID, 서버 ID)`로 캐시를 분리한다. sequence는 방·서버 실행 안에서만 순서다.
-- 실행 그룹은 클라이언트가 처음 관찰한 순서, 그룹 안은 sequence, 미수락 행은 마지막 로컬 생성 순서다. 재시작 뒤 #1은 이전 #1과 별개이며 UI에 실행 UUID 앞부분을 표시한다. 전역 시간순/서버 영속성은 주장하지 않는다.
-- DB v1→v2 migration은 기존 outbox를 보존한다. 빈 새 서버/오프라인에서도 캐시가 보인다. 계정 전환은 해당 계정이 관찰한 기록만 읽는다.
-- 캐시 준비와 연결 상태는 별도다. 오프라인 캐시는 읽을 수 있고 전송·수동 retry는 연결 뒤에 가능하다. 저장 오류를 표시하며 메모리 수락 목록으로 우회하지 않는다.
-- 서버 DB, 자동 retry/reconnect, cursor 과거 페이징, 누락 복구, Paging3, 읽음/영상 기능은 이 단위에 넣지 않는다. 다음 cursor는 실행 UUID와 sequence를 함께 사용해야 한다.
+- 테스트 신원 `alice`, `bob`; 대화방 `demo`; 텍스트 1–1000자. 실제 로그인·읽음·영상은 없다.
+- 화면: 테스트 신원 선택, 연결/기기 저장 상태, Paging 메시지 목록, 입력, 전송, UNKNOWN 수동 retry, 과거 조회/실패 retry/최신으로 이동.
+- 전송 상태: SENDING → SENT(서버 메모리 수락), FAILED(거절), UNKNOWN(응답 유실 가능). SENT는 영속 서버 저장·상대 수신·읽음을 뜻하지 않는다.
+- 서버는 `127.0.0.1:8080`만 listen한다. Android는 관찰한 serial의 adb reverse로 loopback에 연결한다. 외부 공개·방화벽 변경·유료 서비스·Firebase는 없다.
+- `X-Test-User`는 누구나 흉내 낼 수 있는 로컬 개발 신원이다. HTTP와 WS 업그레이드 전에 신원 및 방 접근을 검사한다. 제품 인증을 대신하지 않는다.
+- 전경 WS는 Application/ProcessLifecycleOwner 소유다. Activity 회전은 연결을 끊지 않으며 배경에서는 WS job을 취소한다. 수동 reconnect는 있지만 백오프 자동 reconnect/retry는 없다.
+- UI 본문은 계정·방별 Room PagingSource만 읽는다. outbox 송신 상태만 transient 오류/retry 정책용 StateFlow에도 관찰한다. 네트워크 callback은 UI 목록을 직접 바꾸지 않는다.
 
-기존 앱·저장소와 독립된 로컬 학습 프로젝트. 서버와 Android 클라이언트 사이에서 메시지가 실제로 오가는 경로를 확인한다.
+## 현재 API 계약
 
-첫 실행 단위의 계약 아래에 두 번째·세 번째 단위에서 추가한 범위를 기록한다. 현재 앱의 로컬 영속화는 세 번째 단위의 Room outbox 계약을 따른다.
-
-스택: Kotlin/Ktor 서버 + Compose/Ktor Client(OkHttp 엔진). 서버/클라이언트는 HTTP/WebSocket JSON 계약으로 분리된 독립 선택이다. Spring Boot도 요구사항을 충족하지만 지금은 Spring 학습보다 메시지 전송 경로를 직접 확인하는 것이 목표라 Ktor로 시작한다. 서버 하나·Android app 하나만 구성한다.
-
-- 로컬 테스트 신원 `alice`, `bob`; 방 `demo`; 텍스트 1–1000자.
-- 화면: 테스트 신원 선택, 연결 중/연결됨/연결 끊김, 메시지 목록, 입력, 전송.
-- 전송 상태: `SENDING` → `SENT`(서버 수락) 또는 `FAILED`(거절)/`UNKNOWN`(응답 유실 가능). `SENT`는 상대의 읽음·수신 확인이 아니다.
-- 서버: 메모리 기록, 프로세스 재시작 시 초기화. REST 전송·기록 조회 + WebSocket 실시간 이벤트.
-- 첫 접속: 서버가 구독 등록과 기록 snapshot을 동일 잠금에서 처리한다. 이후 이벤트를 서버 순서대로 보낸다.
-- 화면 진입·복귀 시 연결한다. 연결 장애 후 백오프 자동 재시도는 없고 버튼으로 다시 연결한다. 영속 outbox/DB, 읽음/배달 상태, 페이징, 실제 인증은 다음 단계.
-- 서버는 `127.0.0.1:8080`만 listen. Android는 `adb reverse tcp:8080 tcp:8080` 후 `127.0.0.1:8080`을 사용한다. 외부 공개·방화벽 변경 없음.
-- 로컬 개발용 `X-Test-User`는 누구나 흉내 낼 수 있는 테스트 신원이다. 실제 인증/보안이 아니다. HTTP/WS 모두 신원과 방 멤버십을 검사한다.
-
-## API 계약 v1
-
-신원 헤더: `X-Test-User: alice` 또는 `bob`. 모든 방 경로는 신원 미지정/알 수 없음 `401`, 접근 불가 방 `403`.
+신원 헤더: `X-Test-User: alice` 또는 `bob`. 모든 방 경로는 신원 미지정/알 수 없음 `401`, 접근 불가 방 `403`이다.
 
 `GET /health` → `{"status":"ok"}`
 
-`GET /rooms/demo/messages` → `{"serverInstanceId":"server process UUID","messages":[Message...]}` (sequence 오름차순, 현재 전체 기록).
+`GET /rooms/demo/messages?limit=20&before=<opaque cursor>` → History. limit 기본 20, 허용 1–50. before 없으면 최신 페이지, 있으면 cursor sequence보다 작은 과거 페이지다. 각 페이지 안은 sequence 오름차순이다. cursor는 방·서버 실행·배타적 sequence를 포함한다. 잘못된 cursor/다른 방 `400`, 이전 서버 실행 `409 CURSOR_EXPIRED`다.
+
+```json
+{"messages":[],"serverInstanceId":"server process UUID","roomId":"demo","nextBefore":null,"endOfHistory":true,"highWatermark":0}
+```
+
+빈 서버 또는 #1까지 읽으면 nextBefore=null/endOfHistory=true다. highWatermark는 응답 생성 시점의 현재 방 마지막 sequence이며 after catch-up 완료를 의미하지 않는다.
 
 `POST /rooms/demo/messages` body:
+
 ```json
 {"clientMessageId":"UUID","text":"hello"}
 ```
-→ `201 Message`; 같은 `(roomId, senderId, clientMessageId)`와 같은 text 재전송은 `200`과 기존 Message. 다른 text로 같은 키를 재사용하면 `409`. 잘못된 UUID/빈 텍스트/1000자 초과 `400`.
+
+→ `201 Message`; 같은 `(roomId, senderId, clientMessageId)`와 같은 text 반복은 `200`과 기존 Message. 같은 키/다른 text `409`; 잘못된 UUID/빈 텍스트/1000자 초과 `400`이다. sender는 요청 body가 아니라 검사한 헤더 신원에서 정한다.
 
 ```json
 {"id":"server UUID","clientMessageId":"client UUID","roomId":"demo","senderId":"alice","text":"hello","sequence":1,"createdAt":"ISO-8601 UTC","serverInstanceId":"server process UUID"}
 ```
 
 `WS /rooms/demo/events`:
+
 ```json
-{"type":"snapshot","serverInstanceId":"server process UUID","messages":[Message...]}
+{"type":"snapshot","page":{"messages":[],"serverInstanceId":"server process UUID","roomId":"demo","nextBefore":null,"endOfHistory":true,"highWatermark":0}}
 {"type":"message","message":{}}
 ```
-첫 프레임은 snapshot. REST 응답과 WS echo의 순서는 보장하지 않는다. Android는 계정·방·실행 UUID·서버 ID로 저장하고 자기 메시지는 `clientMessageId`·본문으로 outbox와 맞춘다. `sequence`는 이 서버 프로세스/방 안에서만 증가한다.
 
-에러 body: `{"code":"...","message":"..."}`. snapshot/실시간/REST 응답의 중복은 하나의 행으로 합쳐야 한다. HTTP 결과를 모르면 새 ID로 자동 재전송하지 않는다.
+첫 snapshot은 최신 **20개** 페이지다. page 생성과 subscribe 등록을 append와 같은 lock에서 처리한다. 그 시점 이후 append는 live 이벤트로 이어진다. Android가 GET→WS로 시작하지 않아 그 사이 누락 틈이 없다. 과거 기록은 before로 별도 조회한다. 느린 구독자의 64개 채널이 넘치면 서버는 해당 연결을 닫는다. HTTP 응답과 WS echo 순서는 보장하지 않는다.
 
-## 검증 목표
+에러 body: `{"code":"...","message":"..."}`. 서버는 메모리이므로 재시작 뒤 idempotency 인덱스와 sequence도 초기화된다. 이전 서버 실행의 누락을 새 서버에서 복원할 수 없다.
 
-서버: 양방향 실시간 왕복, 기록, HTTP/WS 접근 차단, 잘못된 입력, 동일 키 재전송과 충돌, 동시 전송 순서, snapshot 구독 경계.
-Android: debug APK 빌드와 상태 병합 테스트; 기기 상태 확인 후 한 Android 세션 + Bob 테스트 클라이언트 왕복·화면/로그 증거.
+## 저장·중복·오류 계약
 
-## 두 번째 학습 단위: 수락 알림 유실과 같은 ID 재시도
+- Room에 `(계정, 방, clientMessageId)`의 ID·본문·상태·생성 시각을 저장 완료한 뒤만 POST한다. 저장 실패는 입력을 유지한다. 로컬 commit과 서버 append는 하나의 transaction이 아니다.
+- 새 프로세스의 남은 SENDING은 UNKNOWN으로 한 번만 복구한다. reconnect/계정 전환은 살아 있는 HTTP 요청을 재복구하지 않는다. UNKNOWN 버튼은 DB의 조건부 갱신으로 한 번만 claim하며 원래 ID·본문을 전송한다.
+- 모든 수신 경로는 같은 캐시 transaction으로 기록하며 자기 outbox 수락도 함께 갱신한다. SENT를 늦은 실패가 되돌리지 않는다. 계정 변경 뒤 결과도 원래 계정·방에 저장한다.
+- 캐시 키는 `(관찰 계정, 방, 서버 실행, 서버 ID)`다. 실행별 sender/client ID와 sequence에도 unique 제약이 있다. 같은 키의 본문/순서 충돌은 덮어쓰지 않고 실패한다.
+- snapshot/과거 페이지는 추가 병합이며 캐시를 삭제하지 않는다. 실행 그룹은 처음 관찰한 ordinal, 그룹 내부는 sequence, 미수락 outbox는 로컬 생성 순서다. 전역 시간순을 주장하지 않는다.
+- 과거 응답은 요청 경계 바로 앞까지 연속이어야 한다. 기록+HistoryKey는 한 transaction이다. 실패 시 cursor를 유지하고 수동 retry한다. 늦은 응답은 이미 진행한 cursor를 되돌리지 않는다.
+- Room v1→v2→v3 migration은 기존 outbox/캐시를 보존한다. 빈 서버·오프라인에서도 기기가 다운로드한 기록을 읽는다. Paging DB 읽기 오류와 서버 과거 조회 오류를 구분해 표시한다.
 
-- 일반 서버 API와 메모리 `SENT` 계약은 유지한다.
-- 앱은 자기 `UNKNOWN` 행에만 수동 재시도를 제공한다. 원래 clientMessageId·본문을 유지하고, 같은 행이 `SENDING` → `SENT`로 바뀐다. 중복 클릭은 이미 SENDING이므로 막는다.
-- HTTP 응답과 WS 수락 이벤트를 모두 못 받은 경우만 UNKNOWN이 된다. WS로 수락을 알았다면 HTTP timeout 뒤에도 SENT를 유지한다.
-- 실패 주입은 `server/src/test`의 별도 loopback 테스트 프록시를 명시 실행할 때만 활성화한다. 운영 서버의 제어 API·신규 실패 헤더는 추가하지 않는다.
-- `both` 모드(127.0.0.1:8081)는 첫 Alice POST의 서버 수락 후 HTTP 응답을 앱 timeout보다 늦추고, 해당 ID의 WS 이벤트를 숨긴다. `http-only` 모드(127.0.0.1:8082)는 HTTP 응답만 늦추고 WS는 전달한다.
-- 앱의 proxy 선택은 debug APK의 고정된 로컬 학습 모드만 가능하다. 기본/릴리스는 8080 직접 연결이다. retry는 실패 주입하지 않아 서버의 기존 idempotent 응답을 확인한다.
-- 두 번째 단위까지는 DB·영속 outbox·자동 retry/reconnect·읽음 기능을 추가하지 않았다. 당시 프로세스 종료로 미확인 로컬 행이 사라지는 경계는 아래 세 번째 단위에서 Room으로 보완한다.
+## 테스트 전용 실패 주입
 
-공식 참고: [Ktor WebSockets](https://ktor.io/docs/server-websockets.html), [AGP 9.0 / built-in Kotlin](https://developer.android.com/build/releases/agp-9-0-0-release-notes).
+일반 서버에는 실패 제어 API가 없다. `server/src/test`의 별도 loopback 프록시를 명시 실행하고 debug APK 모드를 선택한다. 기본/릴리스는 8080 직접 연결이다.
 
-## 세 번째 학습 단위: 앱 프로세스를 넘는 로컬 outbox
+| scenario | 포트 | 주입 |
+|---|---|---|
+| both | 8081 | 첫 Alice POST의 HTTP 수락을 timeout보다 늦추고 같은 WS 수락을 숨김 |
+| http-only | 8082 | HTTP 수락만 늦춤, WS는 전달 |
+| page-failure | 8081 | 첫 before GET에 503, 나중 과거 조회는 잠깐 지연 후 정상 전달. POST/WS 정상 |
 
-- Room에 `(userId, roomId, clientMessageId)`를 키로 ID·정규화된 본문·상태·로컬 생성 시각·수락된 서버 ID/sequence를 저장한다. 현재 화면의 방은 여전히 demo 하나다. 계정·방 격리는 DB 검사로 확인한다.
-- 새 메시지는 로컬 SENDING 저장이 완료된 뒤에만 POST한다. 저장 실패 시 POST하지 않으며 입력을 유지한다. 로컬 transaction과 서버 요청을 하나의 transaction으로 취급하지 않는다.
-- 새 프로세스는 이전 실행의 SENDING을 UNKNOWN으로 바꾼 뒤 관찰·접속한다. 현재 실행에서 실제 전송 중인 행을 계정 전환/재연결 때 초기화하지 않는다. 자동 재전송은 없다.
-- UNKNOWN 수동 재시도는 DB의 조건부 갱신으로 한 번만 SENDING을 claim하고 기존 ID·본문을 전송한다. 상태 갱신은 항상 원래 계정·방에 적용한다.
-- HTTP·WS·snapshot 수락은 같은 로컬 행의 SENT/서버 ID/sequence를 갱신한다. 이후 timeout·거절로 SENT를 되돌리지 않는다. 중복 수락은 행을 추가하지 않는다.
-- 세 번째 단위 당시 Room은 자신의 송신 의도와 수락 영수증만 저장했다. 완료된 SENT 영수증은 DB에 남지만 서버 snapshot에서 사라진 과거 수락 기록을 현재 history처럼 보여주지 않는다. 화면은 현재 서버 기록 + 해당 계정·방의 미확인/거절 outbox다.
-- 서버는 계속 메모리다. 클라이언트 outbox가 남아도 서버 재시작 뒤 중복 키가 사라지므로 같은 ID 재시도가 새로운 서버 수락을 만들 수 있다. 서버 영속 DB·푸시·자동 재시도·다중 서버는 추가하지 않는다.
-- 검증: 실제 Room DB의 재열기·SENDING 복구·키 격리·재시도 경쟁·수락/실패 순서, 기존 ACK 유실 tests/build/lint, 실제 앱 force-stop/재실행(데이터 삭제와 구분), 재시작 뒤 같은 ID 수동 재시도.
+같은 포트의 both/page-failure는 동시에 실행하지 않는다. 반복 실험은 본인이 시작한 프록시만 다시 실행한다.
+
+## 이번 경계와 다음 한 가지
+
+[페이징 계약](PAGING_CONTRACT.md), [배경 계약](BACKGROUND_CONTRACT.md)을 따른다. Push는 로컬 adapter 검사만 있으며 실제 FCM SDK·token·service·알림 권한·외부 전달은 없다. before 과거 탐색은 after 누락 보충과 다르다. 최신 20개 bootstrap으로 배경 동안의 모든 메시지를 받았다고 주장하지 않는다. 다음 한 가지는 계정·방·서버 실행별 연속 확인 지점 이후의 bounded after catch-up이다.

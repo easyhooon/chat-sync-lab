@@ -21,7 +21,7 @@ fun main() = runBlocking {
             client.webSocket(urlString = "ws://127.0.0.1:8080/rooms/demo/events", request = { header("X-Test-User", "bob") }) {
                 val first = Json.decodeFromString<Event>((incoming.receive() as Frame.Text).readText())
                 check(first.type == "snapshot")
-                println("BOB_READY snapshotCount=${first.messages!!.size}")
+                println("BOB_READY snapshotCount=${first.page!!.messages.size}")
                 for (frame in incoming) {
                     if (frame !is Frame.Text) continue
                     val event = Json.decodeFromString<Event>(frame.readText())

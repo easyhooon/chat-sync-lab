@@ -2,8 +2,10 @@ package chatlab
 
 import java.time.Instant
 import java.util.UUID
+import java.util.Base64
 import kotlinx.coroutines.channels.Channel
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 
 @Serializable
 data class SendMessage(val clientMessageId: String, val text: String)
@@ -13,9 +15,12 @@ data class Message(
     val text: String, val sequence: Long, val createdAt: String, val serverInstanceId: String,
 )
 @Serializable
-data class History(val messages: List<Message>, val serverInstanceId: String)
+data class History(val messages: List<Message>, val serverInstanceId: String, val roomId: String,
+    val nextBefore: String?, val endOfHistory: Boolean, val highWatermark: Long)
 @Serializable
-data class Event(val type: String, val messages: List<Message>? = null, val message: Message? = null, val serverInstanceId: String? = null)
+data class BeforeCursor(val roomId: String, val serverInstanceId: String, val sequence: Long)
+@Serializable
+data class Event(val type: String, val page: History? = null, val message: Message? = null)
 @Serializable
 data class ApiError(val code: String, val message: String)
 class ChatError(val status: Int, val code: String, override val message: String) : RuntimeException(message)
@@ -35,6 +40,26 @@ class ChatStore(private val members: Map<String, Set<String>> = mapOf("demo" to 
 
     @Synchronized
     fun history(room: String) = messages[room].orEmpty().toList()
+
+    @Synchronized
+    fun page(room: String, limit: Int = 20, before: String? = null): History {
+        if (limit !in 1..50) throw ChatError(400, "INVALID_LIMIT", "limit must be 1–50")
+        val cursor = before?.let { encoded ->
+            if (encoded.length > 512) throw ChatError(400, "INVALID_CURSOR", "Invalid before cursor")
+            val parsed = runCatching { Json.decodeFromString<BeforeCursor>(String(Base64.getUrlDecoder().decode(encoded), Charsets.UTF_8)) }
+                .getOrElse { throw ChatError(400, "INVALID_CURSOR", "Invalid before cursor") }
+            if (parsed.roomId != room || parsed.sequence < 1) throw ChatError(400, "CURSOR_SCOPE", "Cursor belongs to another room or has invalid sequence")
+            if (parsed.serverInstanceId != serverInstanceId) throw ChatError(409, "CURSOR_EXPIRED", "Server restarted; reconnect for a new page")
+            parsed
+        }
+        val all = messages[room].orEmpty()
+        val eligible = all.filter { cursor == null || it.sequence < cursor.sequence }
+        val selected = eligible.takeLast(limit)
+        val ended = eligible.size <= limit
+        val next = if (ended) null else Base64.getUrlEncoder().withoutPadding().encodeToString(
+            Json.encodeToString(BeforeCursor.serializer(), BeforeCursor(room, serverInstanceId, selected.first().sequence)).toByteArray(Charsets.UTF_8))
+        return History(selected, serverInstanceId, room, next, ended, all.lastOrNull()?.sequence ?: 0)
+    }
 
     @Synchronized
     fun append(user: String, room: String, request: SendMessage): Accepted {
@@ -65,7 +90,7 @@ class ChatStore(private val members: Map<String, Set<String>> = mapOf("demo" to 
     fun subscribe(user: String, room: String): Channel<Event> {
         authorize(user, room)
         val channel = Channel<Event>(64)
-        channel.trySend(Event("snapshot", messages = history(room), serverInstanceId = serverInstanceId)).getOrThrow()
+        channel.trySend(Event("snapshot", page = page(room))).getOrThrow()
         subscriptions.getOrPut(room) { mutableSetOf() } += channel
         return channel
     }

@@ -7,7 +7,7 @@
 ```mermaid
 sequenceDiagram
     participant UI as MainActivity / ChatScreen
-    participant VM as ChatViewModel
+    participant VM as ForegroundChatSession
     participant DB as Room
     participant HTTP as Server HTTP
     participant Store as ChatStore
@@ -22,12 +22,12 @@ sequenceDiagram
     HTTP-->>VM: 201 Message (재전송이면 200)
     WS-->>VM: message 이벤트 (HTTP 응답보다 먼저 올 수도 있음)
     VM->>DB: 캐시 + SENT 수락 transaction
-    DB-->>VM: 단일 메시지 Flow
-    VM-->>UI: StateFlow 갱신
+    DB-->>UI: Room PagingSource → PagingData
+    VM-->>UI: 연결/오류 StateFlow
 ```
 
 1. [MainActivity.kt](app/src/main/kotlin/dev/chatlab/MainActivity.kt)의 `ChatScreen`은 입력과 전송 콜백만 안다. `ChatRoute`가 lifecycle과 ViewModel 수집을 연결한다. 서버 요청을 composable 본문에 넣지 않아 재구성에 따른 반복 전송을 피한다.
-2. [ChatViewModel.kt](app/src/main/kotlin/dev/chatlab/ChatViewModel.kt)의 `send`는 UUID를 한 번 만들고 Room에 `SENDING` 행을 저장한 뒤 POST한다. 이 시점에는 서버가 아무것도 수락하지 않았다. Ktor Client가 POST를 보내며, 연결/전송 실패는 별도 결과다.
+2. [ForegroundChatSession.kt](app/src/main/kotlin/dev/chatlab/ForegroundChatSession.kt)의 `send`는 UUID를 한 번 만들고 Room에 `SENDING` 행을 저장한 뒤 POST한다. 이 시점에는 서버가 아무것도 수락하지 않았다. Ktor Client가 POST를 보내며, 연결/전송 실패는 별도 결과다.
 3. [Server.kt](server/src/main/kotlin/chatlab/Server.kt)는 업그레이드 전에도 테스트 신원과 방 멤버십을 검사한다. 본문의 senderId를 신뢰하지 않고 헤더로 검사한 신원을 사용한다. 단, 헤더는 누구나 흉내 낼 수 있는 로컬 테스트 신원이라 실제 인증이 아니다.
 4. [ChatStore.kt](server/src/main/kotlin/chatlab/ChatStore.kt)의 `append`는 `(room, sender, clientMessageId)`를 검사한다. 새 요청이면 서버 UUID·sequence·시각을 부여하고 메모리 list에 넣은 뒤 구독 채널에 이벤트를 넣는다. **지금 ACK는 DB commit 뒤가 아니라 메모리 append 뒤에 나간다.**
 5. WebSocket 이벤트와 HTTP 응답은 다른 경로다. 전송자 자신도 echo를 받는다. [MessageCache.kt](app/src/main/kotlin/dev/chatlab/MessageCache.kt)의 transaction이 두 결과를 같은 저장 행으로 합친다. “HTTP 응답이 먼저 올 것”이라는 가정은 하지 않는다.
@@ -56,15 +56,15 @@ POST가 서버에 도착했지만 응답이 오는 길에 끊겼다고 생각해
 | `FAILED` | `400/401/403/409` 같은 명시적인 거절 | 입력·신원·방 접근·ID 충돌 이유 확인 |
 | `UNKNOWN` | timeout/연결 끊김/서버 오류로 결과를 모름 | 서버가 수락했을 수도 있음. 기록 대조가 먼저 |
 
-Android의 `Result.failure` 하나로 네트워크 오류를 모두 묶으면 “서버가 거절했다”와 “수락했지만 응답이 유실됐다”를 구분하지 못한다. 현재 화면은 UNKNOWN에서 자동 재전송하지 않는다. 다시 연결하면 snapshot으로 수락 여부를 대조한다. snapshot에 없다고 곧바로 미수락으로 단정할 수도 없다. 이전 POST가 아직 처리 중일 수 있기 때문이다. 현재 Room outbox와 같은-ID 수동 재시도를 사용하는 이유다.
+Android의 `Result.failure` 하나로 네트워크 오류를 모두 묶으면 “서버가 거절했다”와 “수락했지만 응답이 유실됐다”를 구분하지 못한다. 현재 화면은 UNKNOWN에서 자동 재전송하지 않는다. 다시 연결하면 최신 20개 bootstrap으로 최근 수락을 대조한다. 그 범위 밖의 미확인 행은 과거 조회 또는 같은 ID 수동 retry로 확인해야 한다. snapshot에 없다고 곧바로 미수락으로 단정할 수도 없다. 이전 POST가 아직 처리 중일 수 있기 때문이다. 현재 Room outbox와 같은-ID 수동 재시도를 사용하는 이유다.
 
 WS echo가 먼저 성공을 확인한 뒤 POST가 timeout 나도 `SENT`를 실패로 되돌리지 않는다. 오류 문구도 같은 메시지의 서버 수락이 확인되면 추가하지 않거나 해제한다. DB 수락/실패 순서는 Room instrumentation으로, 화면 오류 해제는 [ChatStateTest.kt](app/src/test/kotlin/dev/chatlab/ChatStateTest.kt)로 검증한다.
 
 ## 처음 연결할 때 history와 이벤트 사이의 틈
 
-단순하게 “GET history 완료 → WS 연결”을 하면 그 사이에 전송된 메시지를 놓칠 수 있다. 반대로 “WS 연결 → GET history”는 중복이 생길 수 있다. 이번 서버는 첫 WS 구독에서 **snapshot을 큐에 넣고 구독을 등록하는 일을 같은 잠금 안에서 처리**한다. `append`도 같은 잠금을 사용하므로 한 메시지는 snapshot에 있거나 이후 이벤트에 있다.
+단순하게 “GET history 완료 → WS 연결”을 하면 그 사이에 전송된 메시지를 놓칠 수 있다. 반대로 “WS 연결 → GET history”는 중복이 생길 수 있다. 이번 서버는 첫 WS 구독에서 **snapshot을 큐에 넣고 구독을 등록하는 일을 같은 잠금 안에서 처리**한다. `append`도 같은 잠금을 사용하므로 최신 tail의 메시지는 첫 페이지에 있고, bootstrap 시점 이후 메시지는 live 이벤트에 있다. 첫 페이지보다 오래된 기록은 before 페이지로 읽는다.
 
-Android는 sequence로 정렬하고 ID로 중복 병합한다. 느린 구독자의 64개 버퍼가 넘치면 서버는 이벤트를 몰래 버리지 않고 해당 연결을 닫는다. 화면 진입·복귀 시 연결하며, 연결 중 장애 뒤 백오프 자동 재시도는 아직 없다. 버튼으로 다시 연결하면 새 snapshot을 받는다. 현재 증분 cursor·누락 복구는 없고 outbox와 관찰한 수신 기록은 Room에 남는다.
+Android는 sequence로 정렬하고 ID로 중복 병합한다. 느린 구독자의 64개 버퍼가 넘치면 서버는 이벤트를 몰래 버리지 않고 해당 연결을 닫는다. 앱 프로세스의 전경 진입·복귀 시 연결하며, 연결 중 장애 뒤 백오프 자동 재시도는 아직 없다. 버튼으로 다시 연결하면 새 snapshot을 받는다. 현재 before 과거 cursor는 있지만 after 누락 복구는 없고 outbox와 관찰한 수신 기록은 Room에 남는다.
 
 ## 손으로 재현할 한 가지
 
@@ -91,7 +91,7 @@ Android 화면의 coroutine을 취소하거나 HTTP 요청에 timeout을 걸면 
 
 ### 같은 행을 재시도하는 코드
 
-[ChatState.kt](app/src/main/kotlin/dev/chatlab/ChatState.kt)의 `retryRequest`는 연결된 자신의 `UNKNOWN` 행에서 **기존 ID와 저장된 본문**을 꺼낸다. [ChatViewModel.kt](app/src/main/kotlin/dev/chatlab/ChatViewModel.kt)의 `retry`는 해당 행을 compare-and-set으로 `SENDING`으로 바꾼 뒤 `send`와 같은 `submit` 경로에 보낸다. 두 번 눌러도 두 번째는 이미 SENDING이라 claim할 수 없다. 그 사이 WS 수락이 도착해 SENT가 됐다면 claim이 실패하거나 수락 상태를 유지한다.
+[ChatState.kt](app/src/main/kotlin/dev/chatlab/ChatState.kt)의 `retryRequest`는 연결된 자신의 `UNKNOWN` 행에서 **기존 ID와 저장된 본문**을 꺼낸다. [ForegroundChatSession.kt](app/src/main/kotlin/dev/chatlab/ForegroundChatSession.kt)의 `retry`는 해당 행을 compare-and-set으로 `SENDING`으로 바꾼 뒤 `send`와 같은 `submit` 경로에 보낸다. 두 번 눌러도 두 번째는 이미 SENDING이라 claim할 수 없다. 그 사이 WS 수락이 도착해 SENT가 됐다면 claim이 실패하거나 수락 상태를 유지한다.
 
 서버는 첫 요청을 이미 기록했으므로 재시도에 `200`과 원래 서버 ID·sequence를 돌려준다. 앱은 같은 캐시 저장 경로로 outbox를 SENT로 바꾸며 중복 행을 추가하지 않는다. HTTP 응답과 WS event의 순서를 가정하지 않는다.
 
@@ -124,7 +124,7 @@ curl -s -H 'X-Test-User: alice' http://127.0.0.1:8080/rooms/demo/messages
 
 ## 세 번째 학습 단위: Room outbox와 프로세스 종료
 
-Room CRUD는 이미 알고 있으므로 **어떤 경계에서 무엇을 알 수 있는가**에 집중한다. 이번에는 자신의 송신 의도와 수락 영수증만 Room에 넣었다. 수신 메시지 전체 캐시·Paging은 다음 단위다. UI는 지금 `Room의 미확인/거절 행 + 현재 서버에서 받은 수락 메시지`를 병합한다.
+Room CRUD는 이미 알고 있으므로 **어떤 경계에서 무엇을 알 수 있는가**에 집중한다. 세 번째 단위 당시에는 자신의 송신 의도와 수락 영수증만 Room에 넣었다. 이후 캐시와 Paging을 추가했다. 당시 UI는 `Room의 미확인/거절 행 + 현재 서버에서 받은 수락 메시지`를 병합한다.
 
 ```mermaid
 sequenceDiagram
@@ -145,7 +145,7 @@ sequenceDiagram
 
 ### 두 commit 사이에는 transaction이 없다
 
-[Outbox.kt](app/src/main/kotlin/dev/chatlab/Outbox.kt)의 `OutboxEntry`는 `(userId, roomId, clientMessageId)`를 primary key로 사용한다. ID·정규화된 text·status·로컬 생성 시각·수락된 serverId/sequence가 저장된다. `ChatApplication`이 프로세스당 하나의 DB/store를 가진다. [ChatViewModel.kt](app/src/main/kotlin/dev/chatlab/ChatViewModel.kt)는 `outbox.enqueue(entry)`가 성공한 다음 POST한다. 저장 실패면 POST하지 않고 입력을 유지한다. 입력을 지우는 기준도 버튼 클릭이 아니라 로컬 저장 완료다.
+[Outbox.kt](app/src/main/kotlin/dev/chatlab/Outbox.kt)의 `OutboxEntry`는 `(userId, roomId, clientMessageId)`를 primary key로 사용한다. ID·정규화된 text·status·로컬 생성 시각·수락된 serverId/sequence가 저장된다. `ChatApplication`이 프로세스당 하나의 DB/store를 가진다. [ForegroundChatSession.kt](app/src/main/kotlin/dev/chatlab/ForegroundChatSession.kt)는 `outbox.enqueue(entry)`가 성공한 다음 POST한다. 저장 실패면 POST하지 않고 입력을 유지한다. 입력을 지우는 기준도 버튼 클릭이 아니라 로컬 저장 완료다.
 
 | 종료/실패 위치 | 남는 정보 | 다음 실행의 해석 |
 |---|---|---|
@@ -161,7 +161,7 @@ Room transaction은 로컬 SQLite 원자성을 제공한다. 서버 append까지
 
 새 프로세스의 `OutboxStore.initialize()`는 이전 SENDING을 UNKNOWN으로 바꾼다. 이전 coroutine은 살아 있지 않지만 이미 서버에 도달한 요청은 처리됐을 수 있기 때문이다. DB의 ID·본문·계정·방·생성 시각은 유지한다. **복구가 자동 재전송은 아니다.**
 
-이 초기화는 프로세스당 한 번이다. 계정을 바꾸거나 WS를 다시 연결할 때 반복하면, 같은 프로세스의 살아 있는 HTTP 요청까지 UNKNOWN으로 바꿔 중복 retry를 허용할 수 있다. ON_STOP은 WS/화면 관찰을 정리하지만 HTTP 결과는 원래 계정·방의 DB에 계속 반영할 수 있다. ViewModel이 정상적으로 취소되면 guarded UNKNOWN 갱신을 시도하고, hard kill에는 그 정리 코드가 실행되지 않으므로 다음 프로세스의 복구가 담당한다.
+이 초기화는 프로세스당 한 번이다. 계정을 바꾸거나 WS를 다시 연결할 때 반복하면, 같은 프로세스의 살아 있는 HTTP 요청까지 UNKNOWN으로 바꿔 중복 retry를 허용할 수 있다. ProcessLifecycleOwner ON_STOP은 WS/송신 상태 관찰을 정리하지만 HTTP 결과는 원래 계정·방의 DB에 계속 반영할 수 있다. HTTP job이 정상적으로 취소되면 guarded UNKNOWN 갱신을 시도하고, hard kill에는 그 정리 코드가 실행되지 않으므로 다음 프로세스의 복구가 담당한다.
 
 ### StateFlow CAS에서 DB 조건부 갱신으로
 
@@ -197,21 +197,21 @@ bash scripts/capture-outbox-db.sh emulator-5554 after-stop
 
 아래 네 번째 단위에서 **수신 기록도 Room에 넣어 HTTP·WS·outbox 수락이 동일 메시지 저장소로 모이게 했다**. 그 뒤 서버 cursor 과거기록 조회와 Room PagingSource를 연결한다. UI가 네트워크 결과를 직접 목록에 추가하는 대신 DB를 읽고, 중복 저장 검사가 실시간/과거 페이지의 겹침을 처리하도록 확장한다.
 
-과거 기록 페이징과 재접속 누락 보충은 같은 문제가 아니다. 전자는 이미 가진 가장 오래된 기록 이전을 가져오고, 후자는 마지막으로 확인한 순서 이후 빠진 메시지를 보충한다. 이 경계와 실시간 수신 중 스크롤 앵커를 검증한 뒤 Paging3/RemoteMediator 필요성을 판단한다. Paging·서버 DB·푸시는 아직 넣지 않았다.
+과거 기록 페이징과 재접속 누락 보충은 같은 문제가 아니다. 전자는 이미 가진 가장 오래된 기록 이전을 가져오고, 후자는 마지막으로 확인한 순서 이후 빠진 메시지를 보충한다. 이 경계와 실시간 수신 중 스크롤 앵커를 검증한 뒤 Paging3/RemoteMediator 필요성을 판단한다. 다섯 번째 단위에서 Room Paging과 로컬 Push adapter를 추가했다. 서버 DB·실제 FCM·after catch-up은 아직 없다.
 
 공식 참고: [Room 의존성·schema 설정](https://developer.android.com/jetpack/androidx/releases/room), [실제 기기에서 Room DB 테스트](https://developer.android.com/training/data-storage/room/testing-db), [Room transaction API](https://developer.android.com/reference/kotlin/androidx/room/package-summary#withTransaction(androidx.room.RoomDatabase,kotlin.coroutines.SuspendFunction0)).
 
 ## 네 번째 학습 단위: 화면의 메시지는 Room에서만 나온다
 
-[15분 능동 실습](CACHE_EXERCISE.md)에서 먼저 결과를 예상하세요. 이번에 읽을 경로는 아래 하나입니다.
+[15분 능동 실습](CACHE_EXERCISE.md)에서 먼저 결과를 예상하세요. 네 번째 단위의 저장 경로는 현재 다음 Paging 읽기로 이어집니다.
 
 ```text
 HTTP history / WS snapshot / WS message / POST 수락
-  → MessageCacheStore.importSnapshot 또는 importMessage
+  → ChatRepository → MessageCacheStore의 page/message 병합
   → Room transaction: immutable 캐시 삽입 + 자신의 outbox 수락
-  → MessageDao.observe(계정, 방): 캐시 + 미수락 outbox SQL projection
-  → ChatViewModel의 한 Flow collector
-  → StateFlow → ChatScreen
+  → MessageDao.pagingSource(계정, 방): 캐시 + 미수락 outbox SQL projection
+  → 프로세스 scope의 Pager.cachedIn
+  → ChatRoute의 LazyPagingItems → ChatScreen
 ```
 
 ViewModel은 네트워크 콜백에서 messages를 직접 바꾸지 않습니다. 로컬 DB 저장 실패를 메모리 목록으로 숨기지도 않습니다. 오류/연결/queueing은 일시적인 화면 상태이며, 메시지 본문과 전송 상태는 DB projection으로 읽습니다. enqueue/retry는 이전 단위처럼 저장 완료 뒤 POST하며 UNKNOWN 자동 재전송은 없습니다.
@@ -226,4 +226,16 @@ cache와 outbox 수락은 같은 로컬 transaction입니다. 화면 SQL은 수�
 
 DB v2는 기존 outbox를 보존하는 1→2 auto migration입니다. schema JSON은 DB 내용 없이 Git에 관리합니다. migration 테스트는 실제 schema1 JSON으로 임시 v1 SQLite DB를 만들고 UNKNOWN/SENDING/SENT를 넣은 뒤 Room v2로 열어 필드 보존과 schema 검사를 확인합니다. destructive fallback은 없습니다.
 
-수신 캐시는 서버 영속 저장·완전한 history·누락 복구가 아닙니다. 서버가 종료되면 아직 이 기기가 관찰하지 않은 메시지는 사라집니다. 다음 단위는 `(serverInstanceId, sequence)` cursor와 과거 조회/실시간 경계를 검증하는 것입니다. Paging3를 붙이기 전에 중복·누락·스크롤 앵커의 의미부터 결정합니다.
+수신 캐시는 서버 영속 저장·완전한 history·누락 복구가 아닙니다. 서버가 종료되면 아직 이 기기가 관찰하지 않은 메시지는 사라집니다. 현재 `(serverInstanceId, sequence)` before cursor와 Room Paging으로 과거 조회/실시간 경계를 검증합니다. 다음은 after 누락 보충입니다.
+
+## 다섯 번째 학습 단위: DB 위치 key와 서버 before는 다르다
+
+[과거 페이지 실습](PAGING_EXERCISE.md)의 #1–#85 예측부터 적어보세요. 첫 WS 페이지는 #66–#85입니다. subscribe와 page 생성이 같은 append lock 안에 있어 초기 latest 조회 뒤 구독까지의 틈이 없습니다. 이후 #86은 live로 저장됩니다. before #66은 sequence <66이므로 새 append와 무관하게 #46–#65를 반환합니다.
+
+`HistoryKey`는 계정·방·서버 실행별 서버 탐색 경계입니다. `PagingSource<Int, MessageRow>`의 Int는 Room의 몇 번째 행을 읽을지 정하는 DB 위치입니다. HTTP 페이지 응답은 캐시와 HistoryKey를 한 transaction으로 저장한 뒤 Room이 PagingSource를 invalidate합니다. 화면은 네트워크 목록을 따로 합치지 않습니다. 서버 경계와 DB key를 드러내려고 이번 작은 coordinator는 RemoteMediator를 사용하지 않았습니다.
+
+과거 응답은 요청 oldestSequence 바로 전까지 연속되어야 합니다. 실패/본문 충돌/다른 실행은 transaction을 전진시키지 않습니다. 늦은 중복 응답은 유효한 본문을 합칠 수 있지만 이미 진행한 cursor를 되돌리지 않습니다. 과거를 읽을 때 새 메시지는 stable key/offset을 유지하고, 최신 끝을 따라가는 사용자는 새 메시지를 바로 봅니다.
+
+`ChatViewModel`은 UI 명령을 프로세스 세션에 위임합니다. `ProcessLifecycleOwner`가 전경 WS를 시작하고 배경에서 취소합니다. Activity 재생성은 소켓 소유권을 바꾸지 않습니다. 별도 `LocalPushAdapter`는 현재 화면 계정이 아니라 delivery 경계가 제공한 boundAccount로 같은 repository/Room에 저장합니다. 중복/늦은 Push와 WS/HTTP가 겹쳐도 한 캐시 행입니다. 실제 FCM 수신과 권한 UX는 [배경 계약](BACKGROUND_CONTRACT.md)의 후속 입력이 필요합니다.
+
+복귀 최신 20개는 모든 누락을 보충하지 않습니다. before를 끝까지 읽는 과거 탐색과 연속 확인 sequence 이후의 after catch-up은 다른 실행입니다. 다음 한 가지는 누락 100개를 bounded after 페이지로 자동 보충하고 live와 합칠 때의 경계를 검증하는 것입니다.

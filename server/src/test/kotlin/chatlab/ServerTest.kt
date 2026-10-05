@@ -25,12 +25,12 @@ class ServerTest {
         val client = createClient { install(ContentNegotiation) { json() }; install(WebSockets) }
         client.webSocket("/rooms/demo/events", request = { header("X-Test-User", "bob") }) {
             val snapshot = Json.decodeFromString<Event>((incoming.receive() as Frame.Text).readText())
-            assertEquals("snapshot", snapshot.type); assertEquals(emptyList(), snapshot.messages)
+            assertEquals("snapshot", snapshot.type); assertEquals(emptyList(), snapshot.page!!.messages)
             val request = SendMessage(id(), "hello bob")
             val response = client.post("/rooms/demo/messages") { header("X-Test-User", "alice"); contentType(ContentType.Application.Json); setBody(request) }
             assertEquals(HttpStatusCode.Created, response.status)
             val accepted = response.body<Message>()
-            assertEquals(snapshot.serverInstanceId, accepted.serverInstanceId)
+            assertEquals(snapshot.page!!.serverInstanceId, accepted.serverInstanceId)
             val event = withTimeout(3000) { Json.decodeFromString<Event>((incoming.receive() as Frame.Text).readText()) }
             assertEquals(accepted, event.message); assertEquals("alice", event.message?.senderId)
             val replay = client.post("/rooms/demo/messages") { header("X-Test-User", "alice"); contentType(ContentType.Application.Json); setBody(request) }
@@ -119,7 +119,7 @@ class ServerTest {
         repeat(10) { store.append("alice", "demo", SendMessage(id(), "before$it")) }
         val channel = store.subscribe("bob", "demo")
         repeat(10) { store.append("alice", "demo", SendMessage(id(), "after$it")) }
-        val snapshot = channel.receive().messages!!
+        val snapshot = channel.receive().page!!.messages
         val live = (1..10).map { channel.receive().message!! }
         assertEquals(store.history("demo"), snapshot + live)
         store.unsubscribe("demo", channel)

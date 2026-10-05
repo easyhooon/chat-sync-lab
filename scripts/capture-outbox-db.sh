@@ -4,8 +4,8 @@ outbox_serial=${1:-}
 outbox_label=${2:-}
 outbox_adb=${CHAT_ADB:-adb}
 outbox_group=${CHAT_EVIDENCE_GROUP:-outbox}
-if [[ "$outbox_group" != outbox && "$outbox_group" != cache ]]; then
-    echo 'CHAT_EVIDENCE_GROUP must be outbox or cache.' >&2
+if [[ "$outbox_group" != outbox && "$outbox_group" != cache && "$outbox_group" != paging ]]; then
+    echo 'CHAT_EVIDENCE_GROUP must be outbox, cache, or paging.' >&2
     exit 2
 fi
 if [ -z "$outbox_serial" ] || [[ ! "$outbox_label" =~ ^[A-Za-z0-9_-]+$ ]]; then

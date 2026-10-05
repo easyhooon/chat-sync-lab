@@ -1,6 +1,7 @@
 package dev.chatlab
 
 import androidx.room.*
+import androidx.paging.PagingSource
 import kotlinx.coroutines.flow.Flow
 
 @Entity(tableName = "cache_sessions", primaryKeys = ["ownerId", "roomId", "serverInstanceId"])
@@ -15,19 +16,7 @@ data class CachedMessage(val ownerId: String, val roomId: String, val serverInst
     fun message() = Message(serverId, clientMessageId, roomId, senderId, text, sequence, createdAt, serverInstanceId)
 }
 
-@Dao
-abstract class MessageDao {
-    @Insert abstract suspend fun insert(message: CachedMessage)
-    @Insert abstract suspend fun insertSession(session: CacheSession)
-    @Query("SELECT * FROM cache_sessions WHERE ownerId = :owner AND roomId = :room AND serverInstanceId = :instance")
-    abstract suspend fun session(owner: String, room: String, instance: String): CacheSession?
-    @Query("SELECT COALESCE(MAX(ordinal), 0) + 1 FROM cache_sessions WHERE ownerId = :owner AND roomId = :room")
-    abstract suspend fun nextOrdinal(owner: String, room: String): Long
-    @Query("SELECT * FROM cached_messages WHERE ownerId = :owner AND roomId = :room AND serverInstanceId = :instance AND serverId = :id")
-    abstract suspend fun find(owner: String, room: String, instance: String, id: String): CachedMessage?
-
-    // One observed statement: a commit cannot expose both the pending row and its accepted replacement.
-    @Query("""
+private const val MESSAGE_PROJECTION = """
         SELECT clientMessageId, senderId, text, serverId, sequence, status, roomId, serverInstanceId, stableKey
         FROM (
             SELECT m.clientMessageId, m.senderId, m.text, m.serverId, m.sequence, 'SENT' AS status,
@@ -41,14 +30,101 @@ abstract class MessageDao {
                 o.roomId, o.serverInstanceId, 'outbox:' || o.userId || ':' || o.roomId || ':' || o.clientMessageId AS stableKey,
                 1 AS pendingSort, 0 AS sessionSort, 0 AS messageSort, o.createdAtMillis AS localSort
             FROM outbox o WHERE o.userId = :owner AND o.roomId = :room AND o.status != 'SENT'
-        ) ORDER BY pendingSort, sessionSort, messageSort, localSort, clientMessageId
-    """)
+        )
+"""
+
+@Dao
+abstract class MessageDao {
+    @Insert abstract suspend fun insert(message: CachedMessage)
+    @Insert abstract suspend fun insertSession(session: CacheSession)
+    @Query("SELECT * FROM cache_sessions WHERE ownerId = :owner AND roomId = :room AND serverInstanceId = :instance")
+    abstract suspend fun session(owner: String, room: String, instance: String): CacheSession?
+    @Query("SELECT COALESCE(MAX(ordinal), 0) + 1 FROM cache_sessions WHERE ownerId = :owner AND roomId = :room")
+    abstract suspend fun nextOrdinal(owner: String, room: String): Long
+    @Query("SELECT * FROM cached_messages WHERE ownerId = :owner AND roomId = :room AND serverInstanceId = :instance AND serverId = :id")
+    abstract suspend fun find(owner: String, room: String, instance: String, id: String): CachedMessage?
+
+    // One observed statement: a commit cannot expose both the pending row and its accepted replacement.
+    @Query(MESSAGE_PROJECTION + " ORDER BY pendingSort, sessionSort, messageSort, localSort, clientMessageId")
     abstract fun observe(owner: String, room: String): Flow<List<MessageRow>>
+    @Query(MESSAGE_PROJECTION + " ORDER BY pendingSort DESC, sessionSort DESC, messageSort DESC, localSort DESC, clientMessageId DESC")
+    abstract fun pagingSource(owner: String, room: String): PagingSource<Int, MessageRow>
+    @Query("SELECT COUNT(*) FROM cached_messages WHERE ownerId=:owner AND roomId=:room AND serverInstanceId=:instance AND sequence>:after AND sequence<=:through")
+    abstract suspend fun countRange(owner: String, room: String, instance: String, after: Long, through: Long): Long
+    @Query("SELECT COALESCE(MAX(sequence), 0) FROM cached_messages WHERE ownerId=:owner AND roomId=:room AND serverInstanceId=:instance")
+    abstract suspend fun maxSequence(owner: String, room: String, instance: String): Long
+
 }
 
 class MessageCacheStore(private val database: OutboxDatabase, private val outbox: OutboxStore) {
     private val dao = database.messages()
     fun observe(owner: String, room: String) = dao.observe(owner, room)
+    fun pagingSource(owner: String, room: String) = dao.pagingSource(owner, room)
+    suspend fun historyKey(owner: String, room: String, instance: String) = database.historyKeys().find(owner, room, instance)
+
+    private fun validatePage(room: String, page: History) {
+        require(page.roomId == room && page.serverInstanceId.isNotBlank())
+        require(page.endOfHistory == (page.nextBefore == null))
+        require(page.messages.all { it.roomId == room && it.serverInstanceId == page.serverInstanceId })
+        require(page.messages.zipWithNext().all { (a, b) -> b.sequence == a.sequence + 1 })
+        require(page.highWatermark >= (page.messages.lastOrNull()?.sequence ?: 0))
+        require(page.messages.isNotEmpty() || page.endOfHistory)
+        require(!page.endOfHistory || page.messages.isEmpty() || page.messages.first().sequence == 1L)
+    }
+
+    suspend fun importLatestPage(owner: String, room: String, page: History) {
+        validatePage(room, page)
+        require(page.highWatermark == (page.messages.lastOrNull()?.sequence ?: 0))
+        database.withTransaction {
+            ensureSession(owner, room, page.serverInstanceId)
+            page.messages.forEach { importInTransaction(owner, room, it) }
+            extendHighWatermark(owner, room, page.serverInstanceId)
+            val previous = historyKey(owner, room, page.serverInstanceId)
+            val first = page.messages.firstOrNull()?.sequence ?: 0
+            val fresh = HistoryKey(owner, room, page.serverInstanceId, page.nextBefore, first, page.highWatermark, page.endOfHistory)
+            val merged = when {
+                previous == null || previous.oldestSequence == 0L -> fresh
+                first == 0L -> error("A nonempty server run cannot become empty")
+                first > previous.highWatermark + 1 -> fresh // A disconnected gap: restart the past traversal at the latest tail.
+                page.highWatermark < previous.oldestSequence - 1 -> previous // Delayed obsolete latest response.
+                else -> previous.copy(
+                    oldestSequence = minOf(first, previous.oldestSequence),
+                    highWatermark = maxOf(page.highWatermark, previous.highWatermark),
+                    nextBefore = if (first < previous.oldestSequence) page.nextBefore else previous.nextBefore,
+                    endReached = if (first < previous.oldestSequence) page.endOfHistory else previous.endReached,
+                )
+            }
+            database.historyKeys().save(merged)
+        }
+    }
+
+    suspend fun importOlderPage(request: HistoryKey, page: History) {
+        validatePage(request.roomId, page)
+        require(page.serverInstanceId == request.serverInstanceId)
+        require(!request.endReached && request.nextBefore != null)
+        require(page.messages.all { it.sequence < request.oldestSequence })
+        require(page.messages.isNotEmpty() || request.oldestSequence == 1L)
+        require(page.messages.isEmpty() || page.messages.last().sequence == request.oldestSequence - 1) {
+            "Older page must end immediately before the requested boundary"
+        }
+        database.withTransaction {
+            ensureSession(request.ownerId, request.roomId, page.serverInstanceId)
+            page.messages.forEach { importInTransaction(request.ownerId, request.roomId, it) }
+            val current = historyKey(request.ownerId, request.roomId, request.serverInstanceId)
+            // Late/repeated responses may add valid rows, but cannot move a newer cursor backwards.
+            if (current?.nextBefore == request.nextBefore && current.oldestSequence == request.oldestSequence) {
+                database.historyKeys().save(current.copy(nextBefore = page.nextBefore, endReached = page.endOfHistory,
+                    oldestSequence = page.messages.firstOrNull()?.sequence ?: current.oldestSequence))
+            }
+        }
+    }
+
+    private suspend fun extendHighWatermark(owner: String, room: String, instance: String) {
+        val key = historyKey(owner, room, instance) ?: return
+        val highest = dao.maxSequence(owner, room, instance)
+        if (highest > key.highWatermark && dao.countRange(owner, room, instance, key.highWatermark, highest) == highest - key.highWatermark)
+            database.historyKeys().save(key.copy(highWatermark = highest))
+    }
 
     suspend fun importSnapshot(owner: String, room: String, instance: String, messages: List<Message>) {
         require(instance.isNotBlank())
@@ -65,6 +141,7 @@ class MessageCacheStore(private val database: OutboxDatabase, private val outbox
         database.withTransaction {
             ensureSession(owner, room, message.serverInstanceId)
             importInTransaction(owner, room, message)
+            extendHighWatermark(owner, room, message.serverInstanceId)
         }
     }
 

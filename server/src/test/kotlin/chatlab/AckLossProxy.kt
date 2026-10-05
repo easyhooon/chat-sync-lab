@@ -26,13 +26,14 @@ import kotlinx.serialization.json.Json
 import kotlin.time.Duration.Companion.seconds
 
 // Test source set only. No control route, fault headers, or production server changes.
-enum class AckLossMode(val port: Int) { BOTH(8081), HTTP_ONLY(8082) }
+enum class AckLossMode(val port: Int) { BOTH(8081), HTTP_ONLY(8082), PAGE_FAILURE(8081) }
 
 fun main(args: Array<String>) {
     val mode = when (args.singleOrNull()) {
         "both" -> AckLossMode.BOTH
         "http-only" -> AckLossMode.HTTP_ONLY
-        else -> error("Explicit opt-in required: -Pscenario=both or -Pscenario=http-only")
+        "page-failure" -> AckLossMode.PAGE_FAILURE
+        else -> error("Explicit opt-in required: -Pscenario=both, http-only, or page-failure")
     }
     println("ACK_LOSS_PROXY_MODE mode=$mode listen=127.0.0.1:${mode.port} upstream=127.0.0.1:8080")
     embeddedServer(Netty, host = "127.0.0.1", port = mode.port) { ackLossProxyModule(mode) }.start(wait = true)
@@ -42,6 +43,7 @@ fun Application.ackLossProxyModule(mode: AckLossMode, upstreamPort: Int = 8080, 
     val upstream = HttpClient(CIO) { install(io.ktor.client.plugins.contentnegotiation.ContentNegotiation) { json() }; install(io.ktor.client.plugins.websocket.WebSockets) }
     monitor.subscribe(ApplicationStopped) { upstream.close() }
     val faultedId = AtomicReference<String?>(null)
+    val faultedPage = java.util.concurrent.atomic.AtomicBoolean(false)
     val auth = ChatStore()
     install(io.ktor.server.plugins.contentnegotiation.ContentNegotiation) { json() }
     install(StatusPages) { exception<ChatError> { call, cause -> call.respond(HttpStatusCode.fromValue(cause.status), ApiError(cause.code, cause.message)) } }
@@ -53,7 +55,18 @@ fun Application.ackLossProxyModule(mode: AckLossMode, upstreamPort: Int = 8080, 
         route("/rooms/demo") {
             install(access)
             get("/messages") {
-                val response = upstream.get("http://127.0.0.1:$upstreamPort/rooms/demo/messages") { header("X-Test-User", call.request.header("X-Test-User")!!) }
+                val before = call.request.queryParameters["before"]
+                if (mode == AckLossMode.PAGE_FAILURE && before != null) {
+                    println("PROXY_PAGE_REQUEST before=$before")
+                    if (faultedPage.compareAndSet(false, true)) {
+                        println("PROXY_PAGE_FAILED before=$before")
+                        call.respond(HttpStatusCode.ServiceUnavailable, ApiError("TEST_PAGE_FAILURE", "Local test: retry the same before cursor"))
+                        return@get
+                    }
+                    delay(1500) // A live WS message can arrive while an older HTTP page is in flight.
+                }
+                val response = upstream.get("http://127.0.0.1:$upstreamPort/rooms/demo/messages") { header("X-Test-User", call.request.header("X-Test-User")!!)
+                    url { parameters.appendAll(call.request.queryParameters) } }
                 if (response.status.isSuccess()) call.respond(response.status, response.body<History>())
                 else call.respond(response.status, response.body<ApiError>())
             }
@@ -61,7 +74,7 @@ fun Application.ackLossProxyModule(mode: AckLossMode, upstreamPort: Int = 8080, 
                 val user = call.request.header("X-Test-User")!!
                 val request = call.receive<SendMessage>()
                 // Arm BEFORE forwarding: an upstream WS echo can beat the upstream HTTP response.
-                val inject = user == "alice" && faultedId.compareAndSet(null, request.clientMessageId)
+                val inject = mode != AckLossMode.PAGE_FAILURE && user == "alice" && faultedId.compareAndSet(null, request.clientMessageId)
                 val response = upstream.post("http://127.0.0.1:$upstreamPort/rooms/demo/messages") {
                     header("X-Test-User", user); contentType(ContentType.Application.Json); setBody(request)
                 }

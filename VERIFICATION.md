@@ -187,3 +187,52 @@ CHAT_EVIDENCE_GROUP=cache bash scripts/capture-outbox-db.sh <serial> <label>
 `build-verification-final.log`, `room-verification-final.log`, `evidence-verification.log`와 모듈 JUnit XML/lint 보고서가 검사 근거다. final DB와 현재 서버 history의 개수가 다른 이유는 이전 서버 실행의 두 캐시 행을 의도대로 보존했기 때문이다.
 
 실기기·두 Android 동시 실행·UI instrumentation·release 빌드·디스크 손상/용량 부족 주입·ViewModel generation 경쟁 자동 검사는 미실행이다. 실제 한 Android 세션 + Ktor Bob WS peer를 사용했다. ACK 프록시 통합과 기존 outbox DB 검사는 재실행했지만 이번 최종 APK로 BOTH/HTTP-only 수동 유실 데모는 반복하지 않았다. 자동 retry/reconnect·서버 DB·cursor 과거 페이징·누락 보충은 추가하지 않았다. 다음 한 가지는 실행 UUID를 포함하는 cursor의 과거 조회/실시간 중복·누락 경계를 직접 검증하는 것이다.
+
+## 다섯 번째 단위: 과거 cursor·Room Paging·전경 소켓 — 2026-10-06 (한국시간)
+
+착수 checkout은 `d9241a25d2de6603c560b240b9d76aca9ed8ff58`이며 local/remote main 일치·clean이었다. 설치된 도구를 유지하고 공식 프로젝트 의존성에 Paging 3.5.1, Room Paging 2.8.5, lifecycle-process 2.9.4를 추가했다. 새 시스템 도구·Firebase 설정·계정·서비스는 없다. 서버/앱을 함께 빌드해야 하는 bounded page API 변경이며 DB v3는 v2 캐시와 outbox를 보존한다.
+
+| 검사 | 최종 실제 결과 |
+|---|---|
+| 서버 통합/unit | 13 tests, failures/errors/skips 0. 기존 HTTP/WS·권한·idempotency·ACK 유실 + exclusive page·bootstrap/live lock·cursor room/run 오류·503 동일 cursor retry 중 live 수신 |
+| Android JVM | 6 tests, failures/errors/skips 0 |
+| Android API 34 instrumentation | outbox 8 + 캐시 13 + Paging DB 7 + Push 경계 3 + Activity 재생성/process lifecycle 1 = 32, failures/errors/skips 0. 최종 46초 |
+| APK·instrumentation APK·server installDist | 검토 보강 후 실제 빌드·설치 성공 |
+| lint | errors 0, warnings 16: 의존성 버전 안내 13 + 기존 target/backup/icon 안내 3 |
+| Bounded bootstrap | 합성 기록 85개. 실제 첫 DB는 #66–#85의 20개, oldest=66/highWatermark=85/end=false |
+| 과거 스크롤 중 live | #83 key/offset=293px 유지, 위치 index만 2→3. #86이 최신에 추가됨 |
+| 실패·프로세스 경계 | 첫 before #66은 503. 오류/재시도 버튼·기존 기록 표시. 앱 종료 DB의 cursor/oldest=66 유지, 캐시는 live 포함 21개. 재실행 뒤 명시 버튼으로 동일 before 성공 |
+| 과거 조회 중 live | retry 요청(19:52:48.933) → WS #87(49.195) → older #46–#65 commit(50.530). #84 key/offset=291px 유지 |
+| 끝까지 과거 조회 | before 66→46→26→6, #1 도달 후 oldest=1/end=true/nextBefore=null. 완료 화면 확인 |
+| Android↔Bob peer | Alice own-paging #88 HTTP/WS 수락 한 행 → Bob WS 수신/HTTP 응답 #89 → Android 수신. ROUND_TRIP_PASS. 콘솔 historyCount=20은 현재 API의 최신 페이지 개수 |
+| 실제 배경/복귀 | ProcessLifecycleOwner socketStopped 로그 뒤 #90/#91을 서버에 추가. 배경에는 WS receive 없음. 전경 복귀 bounded bootstrap hwm=91 및 두 본문 표시 |
+| 최종 서버/DB 대조 | HTTP 전체 cursor 순회 #1–#91과 Alice 캐시 91개 ID/본문/순서 일치, 중복·누락 없음. key(1,91,end=true), Alice SENT outbox 한 행 #88 |
+| 새 프로세스·오프라인 Paging | 서버/proxy 종료·reverse 제거·포트 닫힘 확인. PID 9257→10968, 캐시에서 최신20개 밖 #63–#66 표시. Bob 빈 캐시/Alice 복원, 네 테이블 모든 필드 동일 |
+| 증거/스크립트 검사 | verify-paging-evidence.py 6개 PASS, Python 문법·capture bash 문법·git diff 검사 PASS |
+
+코드를 구현 이후 별도 관점으로 다시 읽어 데이터 흐름·접근 검사·중복·오류 표시를 확인했다. 별도 외부 에이전트 검토나 자료 전송은 하지 않았다. DB Paging의 위치 Int key와 서버 opaque before key를 분리하고 과거 기록+key를 한 transaction으로 묶었다. 요청 경계 바로 앞까지 연속된 응답만 허용한다. scope/본문 충돌은 rollback, 늦은 응답은 현재 key가 요청 key와 같을 때만 전진한다. Room의 미수락 outbox→accepted 행은 stable key를 유지한다. Paging DB 읽기 실패와 서버 과거 조회 실패를 별도로 표시한다.
+
+전경 소켓은 Application의 ProcessLifecycleOwner에 속하고 ViewModel은 facade다. Push/HTTP/WS/page는 공통 repository/cache를 사용하며 전달 계정이 현재 UI 계정과 달라도 원래 scope에 저장한다. 실제 ActivityScenario 재생성은 generation을 유지하고, CREATED/RESUMED는 배경 취소/새 전경 generation을 확인했다. 로컬 Push tests는 중복·늦은 원래 계정 결과·SENT 역전 방지·metadata 검사·socket 미시작을 확인했다.
+
+### 실패·중단 뒤 최종 검증
+
+- 첫 serial 지정 기기 검사 32개는 31 통과/1 실패였다. 단독 cold PagingSource의 invalidation callback 대기가 timeout이었다. 실제 Pager collector의 generation/81번 live row를 검사하도록 고쳐 7개 재검사 통과 후 최종 32개 전체를 재실행했다. 최초 실패 로그를 보존했다.
+- 그 이전 첫 기기 명령에는 serial 제한을 빠뜨려 영상용 emulator-5558에도 dev.chatlab/dev.chatlab.test APK가 설치됐다. 해당 명령을 중단하고 이후 ANDROID_SERIAL와 android.injected.device.serial을 모두 5554로 지정했다. 영상 앱 삭제·종료·데이터 초기화를 수행하지 않았다. 영상 담당의 전용 AVD 종료·5558/8090 닫힘 확인 후 순차 기기 검증을 재개했다.
+- 동시 AVD 사용 중 System UI 오류/ADB timeout과 Mac 메모리 약 31GB/압축 약 15GB가 관찰됐다. 대기 중 채팅 AVD도 종료됐고 로그에 ColorBuffer 오류·크래시 기록이 있었다. 정확한 크래시 원인으로 메모리 부족을 단정하지 않았다. 읽기 전용 Pixel_8a를 headless로 다시 실행해 최종 32개와 데모를 통과했다. 다른 프로세스를 종료하지 않았다.
+- 과거 응답 직후 첫 XML은 아직 ‘조회 중’이라 완료 화면 assertion이 실패했다. OLDER_CACHED end=true 뒤 안정된 history-end-final XML/PNG로 다시 확인했다. 오프라인 첫 dump의 null root는 제한된 재시도로 회복했다. 오류 표시 때문에 목록 bounds가 바뀌어 초기 고정 좌표 swipe가 움직이지 않아, 관찰한 XML bounds 안의 swipe로 최종 #63–#66을 확인했다. 초기 캡처를 완료 근거로 사용하지 않았다.
+
+### 재현·근거·남은 경계
+
+[15분 실습](PAGING_EXERCISE.md)은 빈 서버에 85개 fixture를 먼저 만들고 앱을 시작해 before/실시간/실패 위치를 예측한다. 과거를 조회하며 같은 key/offset이 유지되는지 관찰하고, 다른 서버 실행으로 전환한 뒤 늦은 과거 응답을 병합하는 테스트를 사용자가 추가한다. 일반 서버에는 실패 제어 경로가 없다. page-failure 프록시는 src/test의 별도 loopback 실행이며 debug APK에서만 선택한다.
+
+로컬 `evidence/paging/`의 server-junit(13), jvm-junit(6), final-room-results(32), review-build.log, room-final-verification.log, lint-results-debug.xml, proxy/app/peer 로그, UI XML/PNG, history JSON, initial20/after-failed/online-final/offline-final DB+WAL이 근거다. 최초 실패/중단 로그와 7개 재검사도 별도로 보존했다. 공개 Git에는 DB 내용·로그·화면·SDK 설정을 넣지 않고 schema v1/v2/v3만 관리한다.
+
+```bash
+python3 scripts/verify-paging-evidence.py
+# 자신의 앱을 멈춘 뒤 현재 DB/WAL만 캡처:
+CHAT_EVIDENCE_GROUP=paging bash scripts/capture-outbox-db.sh <serial> <label>
+```
+
+이 작업의 서버·프록시·읽기 전용 AVD는 종료한다. 종료한 read-only AVD의 앱 데이터를 다음 실행의 영속 DB로 취급하지 않는다. 기기/서버를 새로 시작하고 로컬 fixture로 재현한다.
+
+실제 FCM·알림 권한 거절·배경 Push delivery·OS 메모리 kill 후 FCM wake-up·실기기·두 Android 동시 채팅·release APK·디스크 손상/용량 부족 주입은 미실행이다. 배경동안 **두 개** 기록의 복귀 수신은 확인했으나 최신20개를 넘는 자동 누락 보충은 구현/검증하지 않았다. NeedsCatchUp은 내구성 있는 sync queue가 아니다. 서버는 메모리이며 테스트 헤더는 제품 인증이 아니다. [배경 계약](BACKGROUND_CONTRACT.md)에 최소 연결 입력 및 force-stop/OS kill 차이를 남겼다. 다음 한 가지는 연속 확인 지점 이후의 bounded after catch-up이다.

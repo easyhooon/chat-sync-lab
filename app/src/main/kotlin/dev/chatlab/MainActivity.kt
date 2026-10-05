@@ -6,7 +6,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -14,9 +13,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.paging.compose.*
+import androidx.paging.LoadState
+import kotlinx.coroutines.flow.distinctUntilChanged
+import android.util.Log
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
@@ -27,9 +27,10 @@ class MainActivity : ComponentActivity() {
             val mode = if (BuildConfig.DEBUG) when (intent.getStringExtra("ack_loss_lab")) {
                 "both" -> LabMode.BOTH_LOST
                 "http-only" -> LabMode.HTTP_LOST
+                "page-failure" -> LabMode.PAGE_FAILURE
                 else -> LabMode.DIRECT
             } else LabMode.DIRECT
-            ChatViewModel((application as ChatApplication).outbox, (application as ChatApplication).messages, mode)
+            ChatViewModel((application as ChatApplication).foregroundSession, mode)
         } }
     }
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -41,23 +42,16 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun ChatRoute(viewModel: ChatViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
-    val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner, viewModel) {
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_START -> viewModel.connect()
-                Lifecycle.Event.ON_STOP -> viewModel.disconnect()
-                else -> Unit
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer); viewModel.disconnect() }
+    key(state.user, state.roomId) {
+        val flow = remember(state.user, state.roomId) { viewModel.pagedMessages(state.user, state.roomId) }
+        val rows = flow.collectAsLazyPagingItems()
+        ChatScreen(state, rows, onSelectUser = viewModel::connect, onReconnect = { viewModel.connect() },
+            onSend = viewModel::send, onRetry = viewModel::retry, onOlder = viewModel::loadOlder)
     }
-    ChatScreen(state, onSelectUser = viewModel::connect, onReconnect = { viewModel.connect() }, onSend = viewModel::send, onRetry = viewModel::retry)
 }
 
 @Composable
-fun ChatScreen(state: ChatState, onSelectUser: (String) -> Unit, onReconnect: () -> Unit, onSend: (String) -> Unit, onRetry: (String) -> Unit) {
+fun ChatScreen(state: ChatState, rows: LazyPagingItems<MessageRow>, onSelectUser: (String) -> Unit, onReconnect: () -> Unit, onSend: (String) -> Unit, onRetry: (String) -> Unit, onOlder: () -> Unit) {
     var draft by rememberSaveable(state.user) { mutableStateOf("") }
     var observedQueuedId by rememberSaveable(state.user) { mutableStateOf(state.lastQueuedId) }
     LaunchedEffect(state.lastQueuedId) {
@@ -67,8 +61,35 @@ fun ChatScreen(state: ChatState, onSelectUser: (String) -> Unit, onReconnect: ()
         }
     }
     val listState = rememberLazyListState()
-    LaunchedEffect(state.messages.lastOrNull()?.clientMessageId, state.messages.lastOrNull()?.status, state.messages.size) {
-        if (state.messages.isNotEmpty()) listState.animateScrollToItem(state.messages.lastIndex)
+    val cacheReadFailed = listOf(rows.loadState.refresh, rows.loadState.prepend, rows.loadState.append)
+        .any { it is LoadState.Error }
+    var followLatest by remember { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        snapshotFlow { Triple(listState.isScrollInProgress, listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset) }
+            .distinctUntilChanged().collect { (scrolling, index, offset) ->
+                if (scrolling) followLatest = index == 0 && offset < 40
+            }
+    }
+    val newestKey = rows.itemSnapshotList.items.firstOrNull()?.stableKey
+    LaunchedEffect(newestKey, state.lastQueuedId, followLatest) {
+        if (rows.itemCount > 0 && followLatest && !listState.isScrollInProgress) listState.scrollToItem(0)
+    }
+    LaunchedEffect(rows, listState, state.connected, state.loadingOlder, state.olderError, state.historyEnd) {
+        snapshotFlow {
+            val last = listState.layoutInfo.visibleItemsInfo.maxOfOrNull { it.index } ?: -1
+            rows.itemCount > 0 && last >= rows.itemCount - 3 && rows.loadState.append is LoadState.NotLoading &&
+                rows.loadState.append.endOfPaginationReached
+        }.distinctUntilChanged().collect { edge ->
+            if (edge && state.connected && !state.loadingOlder && state.olderError == null && !state.historyEnd) onOlder()
+        }
+    }
+    if (BuildConfig.DEBUG) LaunchedEffect(rows, listState, state.user) {
+        snapshotFlow { Triple(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset, listState.isScrollInProgress) }
+            .distinctUntilChanged().collect { (index, offset, scrolling) ->
+                if (!scrolling) if (index < rows.itemCount) rows.peek(index)?.let { row ->
+                    Log.i("ChatLab", "SCROLL_ANCHOR user=${state.user} key=${row.stableKey} sequence=${row.sequence} index=$index offset=$offset")
+                }
+            }
     }
     Surface(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -83,9 +104,21 @@ fun ChatScreen(state: ChatState, onSelectUser: (String) -> Unit, onReconnect: ()
             }
             if (!state.connected) OutlinedButton(onClick = onReconnect) { Text("다시 연결") }
             state.error?.let { Text(it.message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
-            LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (state.messages.isEmpty()) item { Text("첫 메시지를 보내세요.") }
-                items(state.messages, key = { it.stableKey }) { row ->
+            if (cacheReadFailed) Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("기기 기록 읽기 실패", color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
+                TextButton(onClick = { rows.retry() }) { Text("기기 기록 다시 읽기") }
+            }
+            Row(Modifier.fillMaxWidth().height(56.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(if (state.loadingOlder) "과거 기록 조회 중" else if (state.olderError != null) "과거 조회 실패" else if (state.historyEnd) "현재 서버의 처음까지 확인" else "과거 기록", modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelSmall)
+                if (!state.historyEnd) TextButton(onClick = onOlder, enabled = state.connected && !state.loadingOlder) {
+                    Text(if (state.olderError != null) "과거 조회 재시도" else "과거 더 보기")
+                }
+                if (!followLatest) TextButton(onClick = { followLatest = true }, enabled = rows.itemCount > 0) { Text("최신으로") }
+            }
+            LazyColumn(state = listState, reverseLayout = true, modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (rows.itemCount == 0 && rows.loadState.refresh is LoadState.NotLoading) item { Text("저장된 메시지가 없습니다.") }
+                items(count = rows.itemCount, key = rows.itemKey { it.stableKey }) { index ->
+                    val row = rows[index] ?: return@items
                     val own = row.senderId == state.user
                     Column(Modifier.fillMaxWidth(), horizontalAlignment = if (own) Alignment.End else Alignment.Start) {
                         Card(colors = CardDefaults.cardColors(containerColor = if (own) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh)) {

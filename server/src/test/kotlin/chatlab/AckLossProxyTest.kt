@@ -21,6 +21,33 @@ class AckLossProxyTest {
     @Test fun bothNotificationsLostThenSameIdRetryReturnsOriginalMessage() = runBlocking { exercise(AckLossMode.BOTH) }
     @Test fun lostHttpStillHasWebSocketAcceptanceAndReplayDoesNotDuplicate() = runBlocking { exercise(AckLossMode.HTTP_ONLY) }
 
+    @Test fun failedOlderPageCanRetrySameCursorWhileLiveEventsContinue() = runBlocking {
+        val store = ChatStore()
+        repeat(45) { store.append("bob", "demo", SendMessage(UUID.randomUUID().toString(), "fixture-$it")) }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = 0) { chatModule(store) }.start(false)
+        var proxy: EmbeddedServer<*, *>? = null
+        val client = HttpClient(CIO) { install(ContentNegotiation) { json() }; install(WebSockets) }
+        try {
+            val port = server.engine.resolvedConnectors().single().port
+            val started = embeddedServer(Netty, host = "127.0.0.1", port = 0) { ackLossProxyModule(AckLossMode.PAGE_FAILURE, port) }.start(false)
+            proxy = started
+            val proxyPort = started.engine.resolvedConnectors().single().port
+            client.webSocket(urlString = "ws://127.0.0.1:$proxyPort/rooms/demo/events", request = { header("X-Test-User", "alice") }) {
+                val page = requireNotNull(Json.decodeFromString<Event>((incoming.receive() as Frame.Text).readText()).page)
+                suspend fun older() = client.get("http://127.0.0.1:$proxyPort/rooms/demo/messages") {
+                    header("X-Test-User", "alice"); parameter("before", page.nextBefore); parameter("limit", 20)
+                }
+                assertEquals(HttpStatusCode.ServiceUnavailable, older().status)
+                val live = store.append("bob", "demo", SendMessage(UUID.randomUUID().toString(), "live during retry")).message
+                assertEquals(live, Json.decodeFromString<Event>((incoming.receive() as Frame.Text).readText()).message)
+                val retry = older()
+                assertEquals(HttpStatusCode.OK, retry.status)
+                assertEquals((6L..25L).toList(), retry.body<History>().messages.map { it.sequence })
+                assertEquals(46, store.history("demo").size)
+            }
+        } finally { client.close(); proxy?.stop(0, 1000); server.stop(0, 1000) }
+    }
+
     private suspend fun exercise(mode: AckLossMode) {
         val store = ChatStore()
         val server = embeddedServer(Netty, host = "127.0.0.1", port = 0) { chatModule(store) }.start(wait = false)

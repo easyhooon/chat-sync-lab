@@ -38,7 +38,11 @@ fun Application.chatModule(store: ChatStore = ChatStore()) {
         get("/health") { call.respond(mapOf("status" to "ok")) }
         route("/rooms/{roomId}") {
             install(roomAccess)
-            get("/messages") { call.respond(History(store.history(call.parameters["roomId"]!!), store.serverInstanceId)) }
+            get("/messages") {
+                val limit = call.request.queryParameters["limit"]?.let { it.toIntOrNull()
+                    ?: throw ChatError(400, "INVALID_LIMIT", "limit must be an integer") } ?: 20
+                call.respond(store.page(call.parameters["roomId"]!!, limit, call.request.queryParameters["before"]))
+            }
             post("/messages") {
                 val accepted = store.append(call.request.header("X-Test-User")!!, call.parameters["roomId"]!!, call.receive<SendMessage>())
                 call.respond(if (accepted.isNew) HttpStatusCode.Created else HttpStatusCode.OK, accepted.message)

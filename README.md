@@ -2,19 +2,24 @@
 
 Kotlin 개발자를 위한 작은 실시간 채팅 학습 프로젝트. **Ktor 서버 + Android Compose/Ktor Client(OkHttp 엔진)**로 Alice/Bob 두 테스트 신원이 한 방에서 텍스트를 주고받는다.
 
-첫 목표는 실제 네트워크 경로와 메시지 정합성을 관찰하는 것이다. 서버 하나와 Android app 하나로 구성한다. Android는 **Room outbox + 수신 캐시**를 화면의 단일 읽기 경로로 쓰며, 서버는 계속 메모리다. 실제 인증·자동 재전송/재연결·읽음 기능은 아직 없다. 서버는 `127.0.0.1:8080`에만 바인딩한다.
+첫 목표는 실제 네트워크 경로와 메시지 정합성을 관찰하는 것이다. 서버 하나와 Android app 하나로 구성한다. Android는 **Room outbox + 수신 캐시의 PagingSource**를 화면의 단일 읽기 경로로 쓰며, 서버는 계속 메모리다. 실제 인증·자동 재전송/재연결·읽음 기능은 아직 없다. 서버는 `127.0.0.1:8080`에만 바인딩한다.
 
 - [범위·화면 상태·JSON 계약](SCOPE.md)
 - [Android 관점으로 읽는 데이터 경로와 실패 시나리오](STUDY_GUIDE.md)
 - [실제 검증 결과와 한계](VERIFICATION.md)
 - [outbox 예상·재현·테스트 실습](OUTBOX_EXERCISE.md)
 - [수신 캐시와 늦은 snapshot을 이해하는 15분 실습](CACHE_EXERCISE.md)
+- [현재 과거 cursor·Room Paging 계약](PAGING_CONTRACT.md)
+- [과거 조회 실패·실시간 수신·스크롤 실습](PAGING_EXERCISE.md)
+- [전경 소켓·배경 Push의 구현 경계](BACKGROUND_CONTRACT.md)
 
 두 번째 학습 단위는 **수락 알림을 못 받아 UNKNOWN인 메시지를 같은 ID로 수동 재시도**하는 것이다. 기본 앱/서버에는 실패 주입이 없다. [학습 안내의 두 번째 단위](STUDY_GUIDE.md#두-번째-학습-단위-timeout이-서버-기록을-지우지는-않는다)를 따라 별도 테스트 프록시와 debug 학습 모드로만 실행한다.
 
 세 번째 단위는 **프로세스 종료 뒤에도 같은 ID·본문·계정·방·상태를 복구**하는 Room outbox다. 로컬 저장 완료 뒤에만 POST하며, 새 프로세스의 남은 SENDING은 UNKNOWN으로 복구한다. 자동 재전송하지 않는다. [Room의 실패 경계와 다음 캐시·페이징 단계](STUDY_GUIDE.md#세-번째-학습-단위-room-outbox와-프로세스-종료)를 읽으며 실제 종료/재실행을 따라할 수 있다.
 
-네 번째 단위는 **수신 기록을 계정·방별 Room에 보존**하는 것입니다. HTTP history, WebSocket snapshot/event, POST 수락이 같은 저장 경로로 합쳐지며 화면은 DB Flow만 읽습니다. 빈 snapshot으로 과거 캐시를 지우지 않고, 서버 실행 UUID로 재시작 뒤 sequence 재사용을 구분합니다. [직접 예측하고 테스트하기](CACHE_EXERCISE.md)로 먼저 확인하세요.
+네 번째 단위는 **수신 기록을 계정·방별 Room에 보존**하는 것입니다. HTTP history, WebSocket snapshot/event, POST 수락이 같은 저장 경로로 합쳐집니다. 당시 DB Flow 읽기는 아래 다섯 번째 단위의 Room Paging으로 확장했습니다. 빈 snapshot으로 과거 캐시를 지우지 않고, 서버 실행 UUID로 재시작 뒤 sequence 재사용을 구분합니다. [직접 예측하고 테스트하기](CACHE_EXERCISE.md)로 먼저 확인하세요.
+
+다섯 번째 단위는 **최신 20개 WS bootstrap + 배타적 before cursor + Room Paging**입니다. 과거 조회와 live 수신은 같은 캐시로 합치고, 실패한 과거 요청은 같은 cursor로 수동 재시도합니다. 전경 소켓은 Application의 ProcessLifecycleOwner가 관리하므로 Activity 재생성으로 끊기지 않습니다. 배경에서는 소켓을 닫습니다. 로컬 Push adapter 검사는 공통 저장 경로를 확인하며 실제 FCM 전달·자동 catch-up은 아직 없습니다.
 
 ## 실행
 
@@ -33,7 +38,8 @@ sdk.dir=/absolute/path/to/Android/sdk
 관찰한 에뮬레이터 한 개를 실행한 뒤 실제 Room DB 검사를 추가로 실행한다. 테스트는 임시 DB만 만들고 제거하며 검사 자체는 실제 앱 DB를 직접 지우지 않는다. 다만 Android 테스트 도구가 종료 시 대상 APK를 제거할 수 있으므로 수동 데모는 테스트가 끝난 뒤 APK를 설치해 실행한다.
 
 ```bash
-./gradlew :app:connectedDebugAndroidTest
+ANDROID_SERIAL=<observed-serial> ./gradlew -Pandroid.injected.device.serial=<observed-serial> \
+  :app:connectedDebugAndroidTest
 ```
 
 터미널 하나에서 서버를 유지한다.
@@ -57,7 +63,7 @@ adb -s emulator-5554 install -r app/build/outputs/apk/debug/app-debug.apk
 adb -s emulator-5554 shell am start -n dev.chatlab/.MainActivity
 ```
 
-화면이 Alice·연결됨인지 확인하고, 별도 터미널에서 Bob peer를 실행한다.
+전체 검사가 끝난 뒤 APK를 설치합니다. 여러 AVD가 연결돼 있으면 위 검사 명령에도 serial을 반드시 지정합니다. 화면이 Alice·연결됨인지 확인하고, 별도 터미널에서 Bob peer를 실행한다.
 
 ```bash
 ./gradlew :server:demoClient --console=plain
@@ -82,7 +88,7 @@ bash scripts/idempotency-demo.sh
 ## 폴더
 
 - `server`: 신원·방 검사, 메모리 store, HTTP/WS, 서버 테스트와 Bob peer.
-- `app`: 화면, Ktor Client, Room outbox/버전 1 schema, 상태 병합·실제 DB 테스트.
+- `app`: Compose/Paging 화면, 프로세스 전경 세션, 공통 repository, Room outbox·수신 캐시·페이지 키, schema v1/v2/v3와 실제 DB 검사.
 - `scripts`: 로컬 재현 실험·검증 증거 대조.
 - `evidence`(Git 제외): 이 Mac에서 만든 화면·로그·history·빌드 증거.
 

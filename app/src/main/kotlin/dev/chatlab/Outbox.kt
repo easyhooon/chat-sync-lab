@@ -60,12 +60,13 @@ abstract class OutboxDao {
     abstract suspend fun accept(user: String, room: String, id: String, text: String, serverId: String, sequence: Long, instance: String): Int
 }
 
-@Database(entities = [OutboxEntry::class, CachedMessage::class, CacheSession::class], version = 2,
-    exportSchema = true, autoMigrations = [AutoMigration(from = 1, to = 2)])
+@Database(entities = [OutboxEntry::class, CachedMessage::class, CacheSession::class, HistoryKey::class], version = 3,
+    exportSchema = true, autoMigrations = [AutoMigration(from = 1, to = 2), AutoMigration(from = 2, to = 3)])
 @TypeConverters(OutboxConverters::class)
 abstract class OutboxDatabase : RoomDatabase() {
     abstract fun outbox(): OutboxDao
     abstract fun messages(): MessageDao
+    abstract fun historyKeys(): HistoryKeyDao
 
     companion object {
         fun open(context: Context) = Room.databaseBuilder(context.applicationContext, OutboxDatabase::class.java, "chat-outbox.db").build()
@@ -109,4 +110,14 @@ class ChatApplication : Application() {
     private val database by lazy { OutboxDatabase.open(this) }
     val outbox by lazy { OutboxStore(database) }
     val messages by lazy { MessageCacheStore(database, outbox) }
+    val repository by lazy { ChatRepository(outbox, messages) }
+    val foregroundSession by lazy { ForegroundChatSession(repository) }
+    val localPushAdapter by lazy { LocalPushAdapter(repository) }
+    override fun onCreate() {
+        super.onCreate()
+        androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.addObserver(object : androidx.lifecycle.DefaultLifecycleObserver {
+            override fun onStart(owner: androidx.lifecycle.LifecycleOwner) = foregroundSession.onForeground()
+            override fun onStop(owner: androidx.lifecycle.LifecycleOwner) = foregroundSession.onBackground()
+        })
+    }
 }
