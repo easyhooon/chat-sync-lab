@@ -17,8 +17,10 @@ data class OutboxEntry(
     val createdAtMillis: Long = System.currentTimeMillis(),
     val serverId: String? = null,
     val sequence: Long? = null,
+    val serverInstanceId: String? = null,
 ) {
-    fun row() = MessageRow(clientMessageId, userId, text, serverId, sequence, status, roomId)
+    fun row() = MessageRow(clientMessageId, userId, text, serverId, sequence, status, roomId, serverInstanceId,
+        "outbox:$userId:$roomId:$clientMessageId")
 }
 
 class OutboxConverters {
@@ -54,14 +56,16 @@ abstract class OutboxDao {
     @Query("UPDATE outbox SET status = :status WHERE userId = :user AND roomId = :room AND clientMessageId = :id AND status = 'SENDING' AND serverId IS NULL")
     abstract suspend fun unconfirmed(user: String, room: String, id: String, status: SendStatus): Int
 
-    @Query("UPDATE outbox SET status = 'SENT', serverId = :serverId, sequence = :sequence WHERE userId = :user AND roomId = :room AND clientMessageId = :id AND text = :text AND (serverId IS NULL OR serverId = :serverId)")
-    abstract suspend fun accept(user: String, room: String, id: String, text: String, serverId: String, sequence: Long): Int
+    @Query("UPDATE outbox SET status = 'SENT', serverId = :serverId, sequence = :sequence, serverInstanceId = :instance WHERE userId = :user AND roomId = :room AND clientMessageId = :id AND text = :text AND (serverId IS NULL OR serverId = :serverId) AND (serverInstanceId IS NULL OR serverInstanceId = :instance)")
+    abstract suspend fun accept(user: String, room: String, id: String, text: String, serverId: String, sequence: Long, instance: String): Int
 }
 
-@Database(entities = [OutboxEntry::class], version = 1, exportSchema = true)
+@Database(entities = [OutboxEntry::class, CachedMessage::class, CacheSession::class], version = 2,
+    exportSchema = true, autoMigrations = [AutoMigration(from = 1, to = 2)])
 @TypeConverters(OutboxConverters::class)
 abstract class OutboxDatabase : RoomDatabase() {
     abstract fun outbox(): OutboxDao
+    abstract fun messages(): MessageDao
 
     companion object {
         fun open(context: Context) = Room.databaseBuilder(context.applicationContext, OutboxDatabase::class.java, "chat-outbox.db").build()
@@ -93,7 +97,7 @@ class OutboxStore(private val database: OutboxDatabase) {
 
     suspend fun accept(user: String, room: String, message: Message): Int {
         if (message.senderId != user || message.roomId != room) return 0
-        return dao.accept(user, room, message.clientMessageId, message.text, message.id, message.sequence)
+        return dao.accept(user, room, message.clientMessageId, message.text, message.id, message.sequence, message.serverInstanceId)
     }
 
     suspend fun acceptSnapshot(user: String, room: String, messages: List<Message>) {
@@ -102,5 +106,7 @@ class OutboxStore(private val database: OutboxDatabase) {
 }
 
 class ChatApplication : Application() {
-    val outbox by lazy { OutboxStore(OutboxDatabase.open(this)) }
+    private val database by lazy { OutboxDatabase.open(this) }
+    val outbox by lazy { OutboxStore(database) }
+    val messages by lazy { MessageCacheStore(database, outbox) }
 }

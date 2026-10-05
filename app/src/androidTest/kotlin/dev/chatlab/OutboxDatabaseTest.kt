@@ -16,7 +16,7 @@ class OutboxDatabaseTest {
     private val context: Context get() = ApplicationProvider.getApplicationContext()
     private fun memory() = Room.inMemoryDatabaseBuilder(context, OutboxDatabase::class.java).build()
     private fun accepted(entry: OutboxEntry, serverId: String = "server-${entry.clientMessageId}") =
-        Message(serverId, entry.clientMessageId, entry.roomId, entry.userId, entry.text, 1, "2026-10-05T00:00:00Z")
+        Message(serverId, entry.clientMessageId, entry.roomId, entry.userId, entry.text, 1, "2026-10-05T00:00:00Z", "test-instance")
 
     @Test fun reopeningPreservesUnknownAndRecoversAbandonedSendingWithSameIdentity() = runBlocking {
         val name = "outbox-test-${UUID.randomUUID()}.db"

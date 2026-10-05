@@ -2,16 +2,19 @@
 
 Kotlin 개발자를 위한 작은 실시간 채팅 학습 프로젝트. **Ktor 서버 + Android Compose/Ktor Client(OkHttp 엔진)**로 Alice/Bob 두 테스트 신원이 한 방에서 텍스트를 주고받는다.
 
-첫 목표는 실제 네트워크 경로와 메시지 정합성을 관찰하는 것이다. 서버 하나와 Android app 하나로 구성한다. Android는 **Room outbox**로 송신 의도와 수락 영수증을 보존하며, 서버는 계속 메모리다. 실제 인증·자동 재전송/재연결·읽음 기능은 아직 없다. 서버는 `127.0.0.1:8080`에만 바인딩한다.
+첫 목표는 실제 네트워크 경로와 메시지 정합성을 관찰하는 것이다. 서버 하나와 Android app 하나로 구성한다. Android는 **Room outbox + 수신 캐시**를 화면의 단일 읽기 경로로 쓰며, 서버는 계속 메모리다. 실제 인증·자동 재전송/재연결·읽음 기능은 아직 없다. 서버는 `127.0.0.1:8080`에만 바인딩한다.
 
 - [범위·화면 상태·JSON 계약](SCOPE.md)
 - [Android 관점으로 읽는 데이터 경로와 실패 시나리오](STUDY_GUIDE.md)
 - [실제 검증 결과와 한계](VERIFICATION.md)
-- [내가 직접 예상·재현·테스트하는 15–20분 실습](OUTBOX_EXERCISE.md)
+- [outbox 예상·재현·테스트 실습](OUTBOX_EXERCISE.md)
+- [수신 캐시와 늦은 snapshot을 이해하는 15분 실습](CACHE_EXERCISE.md)
 
 두 번째 학습 단위는 **수락 알림을 못 받아 UNKNOWN인 메시지를 같은 ID로 수동 재시도**하는 것이다. 기본 앱/서버에는 실패 주입이 없다. [학습 안내의 두 번째 단위](STUDY_GUIDE.md#두-번째-학습-단위-timeout이-서버-기록을-지우지는-않는다)를 따라 별도 테스트 프록시와 debug 학습 모드로만 실행한다.
 
 세 번째 단위는 **프로세스 종료 뒤에도 같은 ID·본문·계정·방·상태를 복구**하는 Room outbox다. 로컬 저장 완료 뒤에만 POST하며, 새 프로세스의 남은 SENDING은 UNKNOWN으로 복구한다. 자동 재전송하지 않는다. [Room의 실패 경계와 다음 캐시·페이징 단계](STUDY_GUIDE.md#세-번째-학습-단위-room-outbox와-프로세스-종료)를 읽으며 실제 종료/재실행을 따라할 수 있다.
+
+네 번째 단위는 **수신 기록을 계정·방별 Room에 보존**하는 것입니다. HTTP history, WebSocket snapshot/event, POST 수락이 같은 저장 경로로 합쳐지며 화면은 DB Flow만 읽습니다. 빈 snapshot으로 과거 캐시를 지우지 않고, 서버 실행 UUID로 재시작 뒤 sequence 재사용을 구분합니다. [직접 예측하고 테스트하기](CACHE_EXERCISE.md)로 먼저 확인하세요.
 
 ## 실행
 
@@ -27,7 +30,7 @@ sdk.dir=/absolute/path/to/Android/sdk
 ./gradlew :server:test :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
 ```
 
-관찰한 에뮬레이터 한 개를 실행한 뒤 실제 Room DB 검사를 추가로 실행한다. 테스트는 임시 DB만 만들고 제거하며 앱의 outbox 데이터는 지우지 않는다.
+관찰한 에뮬레이터 한 개를 실행한 뒤 실제 Room DB 검사를 추가로 실행한다. 테스트는 임시 DB만 만들고 제거하며 검사 자체는 실제 앱 DB를 직접 지우지 않는다. 다만 Android 테스트 도구가 종료 시 대상 APK를 제거할 수 있으므로 수동 데모는 테스트가 끝난 뒤 APK를 설치해 실행한다.
 
 ```bash
 ./gradlew :app:connectedDebugAndroidTest
@@ -62,7 +65,7 @@ adb -s emulator-5554 shell am start -n dev.chatlab/.MainActivity
 
 `BOB_READY`가 나오면 **2분 이내** 앱에서 `ping`을 보낸다. Bob은 새 Alice 이벤트를 받은 뒤 `Bob reply: ping`을 HTTP로 전송한다. 앱에 응답이 보이고 콘솔에 `ROUND_TRIP_PASS`가 나오면 왕복 성공이다. 오래 걸려 timeout이 나면 peer 명령만 다시 실행한다.
 
-`SENT`/“서버 수락”은 **현재 서버 프로세스의 메모리 기록에 들어갔다**는 뜻이다. 영속 저장·상대 수신·읽음을 뜻하지 않는다. 서버를 종료하면 기록과 중복 키 인덱스가 사라진다.
+`SENT`/“서버 수락”은 **표시한 서버 실행의 메모리 기록에 들어갔다**는 뜻이다. 영속 저장·상대 수신·읽음을 뜻하지 않는다. 서버를 종료하면 서버 기록과 중복 키 인덱스는 사라지지만 기기가 관찰해 저장한 캐시는 남는다. 캐시의 SENT는 과거 실행의 수락도 포함하며, 실행 ID와 sequence를 함께 표시한다.
 
 `UNKNOWN` 행의 “같은 ID로 재시도”는 기존 ID·본문을 유지한다. 연결된 자신의 미확인 행만 재시도하며, 이미 WS로 수락을 확인했다면 HTTP가 timeout 나도 SENT를 유지한다.
 

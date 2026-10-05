@@ -29,7 +29,7 @@ class MainActivity : ComponentActivity() {
                 "http-only" -> LabMode.HTTP_LOST
                 else -> LabMode.DIRECT
             } else LabMode.DIRECT
-            ChatViewModel((application as ChatApplication).outbox, mode)
+            ChatViewModel((application as ChatApplication).outbox, (application as ChatApplication).messages, mode)
         } }
     }
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -73,7 +73,7 @@ fun ChatScreen(state: ChatState, onSelectUser: (String) -> Unit, onReconnect: ()
     Surface(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Chat Lab · demo", style = MaterialTheme.typography.headlineSmall)
-            Text("로컬 테스트 신원 · 서버 메모리 기록", style = MaterialTheme.typography.bodySmall)
+            Text("로컬 테스트 신원 · 계정별 기기 저장 기록", style = MaterialTheme.typography.bodySmall)
             if (state.labMode != LabMode.DIRECT) Text(state.labMode.label, style = MaterialTheme.typography.labelSmall)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 listOf("alice", "bob").forEach { user ->
@@ -85,7 +85,7 @@ fun ChatScreen(state: ChatState, onSelectUser: (String) -> Unit, onReconnect: ()
             state.error?.let { Text(it.message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (state.messages.isEmpty()) item { Text("첫 메시지를 보내세요.") }
-                items(state.messages, key = { "${it.roomId}:${it.senderId}:${it.clientMessageId}" }) { row ->
+                items(state.messages, key = { it.stableKey }) { row ->
                     val own = row.senderId == state.user
                     Column(Modifier.fillMaxWidth(), horizontalAlignment = if (own) Alignment.End else Alignment.Start) {
                         Card(colors = CardDefaults.cardColors(containerColor = if (own) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh)) {
@@ -98,6 +98,7 @@ fun ChatScreen(state: ChatState, onSelectUser: (String) -> Unit, onReconnect: ()
                                     SendStatus.FAILED -> "전송 거절"
                                     SendStatus.UNKNOWN -> "결과 미확인"
                                 } else "#${row.sequence}", style = MaterialTheme.typography.labelSmall)
+                                row.serverInstanceId?.let { Text("서버 실행 ${it.take(8)}", style = MaterialTheme.typography.labelSmall) }
                                 if (state.labMode != LabMode.DIRECT) Text("client ID ${row.clientMessageId.take(8)}", style = MaterialTheme.typography.labelSmall)
                                 if (own && row.status == SendStatus.UNKNOWN) {
                                     TextButton(onClick = { onRetry(row.clientMessageId) }, enabled = state.connected && state.outboxReady) { Text("같은 ID로 재시도") }
@@ -112,7 +113,7 @@ fun ChatScreen(state: ChatState, onSelectUser: (String) -> Unit, onReconnect: ()
                     modifier = Modifier.weight(1f), label = { Text("메시지") }, maxLines = 3, enabled = !state.queueing)
                 Button(onClick = { onSend(draft) }, enabled = state.connected && state.outboxReady && !state.queueing && draft.isNotBlank()) { Text("전송") }
             }
-            Text("수락 = 현재 서버 프로세스의 기록. 서버 재시작 시 삭제됩니다.", style = MaterialTheme.typography.labelSmall)
+            Text("기기 캐시는 서버 재시작 뒤에도 남습니다. #순서는 서버 실행별입니다.", style = MaterialTheme.typography.labelSmall)
         }
     }
 }

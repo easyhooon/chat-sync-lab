@@ -30,6 +30,7 @@ class ServerTest {
             val response = client.post("/rooms/demo/messages") { header("X-Test-User", "alice"); contentType(ContentType.Application.Json); setBody(request) }
             assertEquals(HttpStatusCode.Created, response.status)
             val accepted = response.body<Message>()
+            assertEquals(snapshot.serverInstanceId, accepted.serverInstanceId)
             val event = withTimeout(3000) { Json.decodeFromString<Event>((incoming.receive() as Frame.Text).readText()) }
             assertEquals(accepted, event.message); assertEquals("alice", event.message?.senderId)
             val replay = client.post("/rooms/demo/messages") { header("X-Test-User", "alice"); contentType(ContentType.Application.Json); setBody(request) }
@@ -39,8 +40,18 @@ class ServerTest {
             assertEquals(HttpStatusCode.Created, reply.status)
             assertEquals("bob", withTimeout(3000) { Json.decodeFromString<Event>((incoming.receive() as Frame.Text).readText()) }.message?.senderId)
             val history = client.get("/rooms/demo/messages") { header("X-Test-User", "alice") }.body<History>()
+            assertEquals(accepted.serverInstanceId, history.serverInstanceId)
             assertEquals(listOf(1L, 2L), history.messages.map { it.sequence })
         }
+    }
+
+    @Test fun storeRestartChangesNamespaceWhileRoomSequenceRestarts() {
+        val request = SendMessage(id(), "same client intent")
+        val old = ChatStore().append("alice", "demo", request).message
+        val restarted = ChatStore().append("alice", "demo", request).message
+        assertEquals(1, old.sequence); assertEquals(1, restarted.sequence)
+        assertNotEquals(old.serverInstanceId, restarted.serverInstanceId)
+        assertNotEquals(old.id, restarted.id)
     }
 
     @Test fun identityAndRoomAccessAreCheckedBeforeHttpAndWebSocketUpgrade() = testApplication {

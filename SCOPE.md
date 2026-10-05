@@ -1,5 +1,15 @@
 # 첫 실행 단위
 
+## 네 번째 단위: 수신 기록의 Room 캐시
+
+- 화면 메시지는 계정·방별 Room Flow에서만 읽는다. HTTP history, WS snapshot/event, POST 수락은 같은 저장 경로에 합친다. 미확인 outbox도 같은 SQL projection에 포함한다.
+- 수신 캐시 삽입과 자신의 outbox SENT 수락은 한 로컬 transaction이다. 중복은 같은 행이며 동일 서버 ID의 다른 본문/sequence는 오류로 처리한다.
+- snapshot은 추가 병합이다. 빠진 기록을 삭제하지 않는다. 서버 실행 UUID `serverInstanceId`를 history·snapshot·message에 포함하며 `(계정, 방, 실행 UUID, 서버 ID)`로 캐시를 분리한다. sequence는 방·서버 실행 안에서만 순서다.
+- 실행 그룹은 클라이언트가 처음 관찰한 순서, 그룹 안은 sequence, 미수락 행은 마지막 로컬 생성 순서다. 재시작 뒤 #1은 이전 #1과 별개이며 UI에 실행 UUID 앞부분을 표시한다. 전역 시간순/서버 영속성은 주장하지 않는다.
+- DB v1→v2 migration은 기존 outbox를 보존한다. 빈 새 서버/오프라인에서도 캐시가 보인다. 계정 전환은 해당 계정이 관찰한 기록만 읽는다.
+- 캐시 준비와 연결 상태는 별도다. 오프라인 캐시는 읽을 수 있고 전송·수동 retry는 연결 뒤에 가능하다. 저장 오류를 표시하며 메모리 수락 목록으로 우회하지 않는다.
+- 서버 DB, 자동 retry/reconnect, cursor 과거 페이징, 누락 복구, Paging3, 읽음/영상 기능은 이 단위에 넣지 않는다. 다음 cursor는 실행 UUID와 sequence를 함께 사용해야 한다.
+
 기존 앱·저장소와 독립된 로컬 학습 프로젝트. 서버와 Android 클라이언트 사이에서 메시지가 실제로 오가는 경로를 확인한다.
 
 첫 실행 단위의 계약 아래에 두 번째·세 번째 단위에서 추가한 범위를 기록한다. 현재 앱의 로컬 영속화는 세 번째 단위의 Room outbox 계약을 따른다.
@@ -21,7 +31,7 @@
 
 `GET /health` → `{"status":"ok"}`
 
-`GET /rooms/demo/messages` → `{"messages":[Message...]}` (sequence 오름차순, 현재 전체 기록).
+`GET /rooms/demo/messages` → `{"serverInstanceId":"server process UUID","messages":[Message...]}` (sequence 오름차순, 현재 전체 기록).
 
 `POST /rooms/demo/messages` body:
 ```json
@@ -30,15 +40,15 @@
 → `201 Message`; 같은 `(roomId, senderId, clientMessageId)`와 같은 text 재전송은 `200`과 기존 Message. 다른 text로 같은 키를 재사용하면 `409`. 잘못된 UUID/빈 텍스트/1000자 초과 `400`.
 
 ```json
-{"id":"server UUID","clientMessageId":"client UUID","roomId":"demo","senderId":"alice","text":"hello","sequence":1,"createdAt":"ISO-8601 UTC"}
+{"id":"server UUID","clientMessageId":"client UUID","roomId":"demo","senderId":"alice","text":"hello","sequence":1,"createdAt":"ISO-8601 UTC","serverInstanceId":"server process UUID"}
 ```
 
 `WS /rooms/demo/events`:
 ```json
-{"type":"snapshot","messages":[Message...]}
+{"type":"snapshot","serverInstanceId":"server process UUID","messages":[Message...]}
 {"type":"message","message":{}}
 ```
-첫 프레임은 snapshot. REST 응답과 WS echo의 순서는 보장하지 않는다. Android는 `id`로 병합하고 자기 메시지는 `clientMessageId`로 pending과 맞춘다. `sequence`는 이 서버 프로세스/방 안에서만 증가한다.
+첫 프레임은 snapshot. REST 응답과 WS echo의 순서는 보장하지 않는다. Android는 계정·방·실행 UUID·서버 ID로 저장하고 자기 메시지는 `clientMessageId`·본문으로 outbox와 맞춘다. `sequence`는 이 서버 프로세스/방 안에서만 증가한다.
 
 에러 body: `{"code":"...","message":"..."}`. snapshot/실시간/REST 응답의 중복은 하나의 행으로 합쳐야 한다. HTTP 결과를 모르면 새 ID로 자동 재전송하지 않는다.
 
@@ -66,6 +76,6 @@ Android: debug APK 빌드와 상태 병합 테스트; 기기 상태 확인 후 �
 - 새 프로세스는 이전 실행의 SENDING을 UNKNOWN으로 바꾼 뒤 관찰·접속한다. 현재 실행에서 실제 전송 중인 행을 계정 전환/재연결 때 초기화하지 않는다. 자동 재전송은 없다.
 - UNKNOWN 수동 재시도는 DB의 조건부 갱신으로 한 번만 SENDING을 claim하고 기존 ID·본문을 전송한다. 상태 갱신은 항상 원래 계정·방에 적용한다.
 - HTTP·WS·snapshot 수락은 같은 로컬 행의 SENT/서버 ID/sequence를 갱신한다. 이후 timeout·거절로 SENT를 되돌리지 않는다. 중복 수락은 행을 추가하지 않는다.
-- Room은 자신의 송신 의도와 수락 영수증만 저장한다. 완료된 SENT 영수증은 DB에 남지만 서버 snapshot에서 사라진 과거 수락 기록을 현재 history처럼 보여주지 않는다. 화면은 현재 서버 기록 + 해당 계정·방의 미확인/거절 outbox다.
+- 세 번째 단위 당시 Room은 자신의 송신 의도와 수락 영수증만 저장했다. 완료된 SENT 영수증은 DB에 남지만 서버 snapshot에서 사라진 과거 수락 기록을 현재 history처럼 보여주지 않는다. 화면은 현재 서버 기록 + 해당 계정·방의 미확인/거절 outbox다.
 - 서버는 계속 메모리다. 클라이언트 outbox가 남아도 서버 재시작 뒤 중복 키가 사라지므로 같은 ID 재시도가 새로운 서버 수락을 만들 수 있다. 서버 영속 DB·푸시·자동 재시도·다중 서버는 추가하지 않는다.
 - 검증: 실제 Room DB의 재열기·SENDING 복구·키 격리·재시도 경쟁·수락/실패 순서, 기존 ACK 유실 tests/build/lint, 실제 앱 force-stop/재실행(데이터 삭제와 구분), 재시작 뒤 같은 ID 수동 재시도.

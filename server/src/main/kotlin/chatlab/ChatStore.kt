@@ -10,12 +10,12 @@ data class SendMessage(val clientMessageId: String, val text: String)
 @Serializable
 data class Message(
     val id: String, val clientMessageId: String, val roomId: String, val senderId: String,
-    val text: String, val sequence: Long, val createdAt: String,
+    val text: String, val sequence: Long, val createdAt: String, val serverInstanceId: String,
 )
 @Serializable
-data class History(val messages: List<Message>)
+data class History(val messages: List<Message>, val serverInstanceId: String)
 @Serializable
-data class Event(val type: String, val messages: List<Message>? = null, val message: Message? = null)
+data class Event(val type: String, val messages: List<Message>? = null, val message: Message? = null, val serverInstanceId: String? = null)
 @Serializable
 data class ApiError(val code: String, val message: String)
 class ChatError(val status: Int, val code: String, override val message: String) : RuntimeException(message)
@@ -23,6 +23,7 @@ data class Accepted(val message: Message, val isNew: Boolean)
 
 // One small, process-local store. The lock makes append + publication + snapshot subscription atomic.
 class ChatStore(private val members: Map<String, Set<String>> = mapOf("demo" to setOf("alice", "bob"))) {
+    val serverInstanceId: String = UUID.randomUUID().toString()
     private val messages = mutableMapOf<String, MutableList<Message>>()
     private val subscriptions = mutableMapOf<String, MutableSet<Channel<Event>>>()
 
@@ -49,7 +50,7 @@ class ChatStore(private val members: Map<String, Set<String>> = mapOf("demo" to 
             return Accepted(previous, false)
         }
         val message = Message(UUID.randomUUID().toString(), request.clientMessageId, room, user, text,
-            (history.lastOrNull()?.sequence ?: 0) + 1, Instant.now().toString())
+            (history.lastOrNull()?.sequence ?: 0) + 1, Instant.now().toString(), serverInstanceId)
         history += message
         // A slow consumer is closed instead of silently dropping events. Manual reconnect gets a new snapshot.
         subscriptions[room]?.removeAll { channel ->
@@ -64,7 +65,7 @@ class ChatStore(private val members: Map<String, Set<String>> = mapOf("demo" to 
     fun subscribe(user: String, room: String): Channel<Event> {
         authorize(user, room)
         val channel = Channel<Event>(64)
-        channel.trySend(Event("snapshot", messages = history(room))).getOrThrow()
+        channel.trySend(Event("snapshot", messages = history(room), serverInstanceId = serverInstanceId)).getOrThrow()
         subscriptions.getOrPut(room) { mutableSetOf() } += channel
         return channel
     }

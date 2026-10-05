@@ -139,3 +139,51 @@ python3 scripts/verify-outbox-evidence.py
 실기기·두 Android 동시 실행·Android UI instrumentation·release 빌드·실제 무선망 단절·디스크 용량 부족/손상 주입·DB migration 변경 검사는 미실행이다. 새 프로세스/동일 DB와 실제 Room instrumentation은 검증했다. selected 테스트 신원은 기존처럼 Alice로 시작하며, 계정별 outbox 기록은 보존된다. 서버 DB가 없어 서버 재시작 뒤 idempotency 기록·sequence가 사라지는 한계는 그대로다.
 
 [15–20분 실습](OUTBOX_EXERCISE.md)은 예상부터 적고 hard kill을 직접 재현한 뒤 본문 불일치 수락 테스트 하나를 사용자가 작성하도록 구성했다. 힌트·해설은 접어 두었고 학습용으로 구현을 망가뜨리지 않았다. 이후 구현을 자동 진행하지 않는다. 다음 한 단위는 수신 기록도 Room 기준으로 통합하는 것이며, 그 다음 서버 cursor 과거 페이징·실시간 중복/누락/스크롤 앵커를 검증한다. Paging3/RemoteMediator는 이번에 추가하지 않았다.
+
+## 네 번째 단위: 수신 캐시와 DB 단일 읽기 — 2026-10-05 (한국시간)
+
+착수 checkout은 `c668d504752c485b66764099f81155bd0abb8fe7`이며 local/remote main 일치·clean이었다. 기존 도구와 의존성을 유지했다. 새 시스템 도구나 서버 DB는 추가하지 않았다. 서버 실행 UUID를 HTTP history/WS snapshot/각 Message에 추가했으므로 앱과 서버를 함께 빌드한다. DB v2의 수신 캐시와 outbox는 한 DB·transaction으로 갱신하며, UI 메시지 목록은 한 SQL Flow만 읽는다.
+
+| 검사 | 실제 결과 |
+|---|---|
+| `:server:test` | HTTP/WS·권한·idempotency·ACK 유실 기존 8 + 실행 namespace 1 = 9, failures/errors/skips 0 |
+| `:app:testDebugUnitTest` | 현재 DB projection/오류 해제/수동 retry 화면 정책 6, failures/errors/skips 0 |
+| `:app:connectedDebugAndroidTest` | 기존 outbox 8 + 수신 캐시/migration 13 = 21, failures/errors/skips 0 |
+| `:server:installDist`, debug/test APK | 실제 빌드·설치 성공 |
+| `:app:lintDebug` | errors 0, warnings 15 |
+| 과거 조회 + 실시간 수신 | 접속 전 Bob `history-cache4` #1 복원, 연결 후 `live-cache4` #2 수신; HTTP history·WS 이벤트·DB·UI 일치 |
+| 동일 요청 반복 | `live-cache4` HTTP 201→200, 같은 서버 ID/sequence, 캐시·history 각 두 행 유지 |
+| 서버 종료 + 새 앱 프로세스 | PID 7813→8186. 서버 종료 및 reverse 제거 상태에서 같은 DB의 Alice 두 수신 행 복원 |
+| 오프라인 계정 전환 | Bob 캐시는 비어 있음; Alice 복귀 시 두 행 표시. online/offline DB 모든 캐시 필드 동일 |
+| 서버 재시작 | 새 실행 빈 history/snapshot 뒤 기존 두 행 유지. 새 Bob #1은 다른 실행 UUID로 세 번째 캐시 행 |
+| 실제 Android/Bob 왕복 | Alice `own-cache4` POST→Bob WS 수신→Bob HTTP 응답→Android WS 수신. `ROUND_TRIP_PASS historyCount=3` |
+| 최종 DB 대조 | 캐시 5개(이전 실행 2 + 현재 3), 실행 그룹 ordinal 1/2, 서로 다른 UI key 5개, Alice SENT outbox 1개. 서버는 현재 3개 |
+| 증거/스크립트/변경 검사 | `verify-cache-evidence.py` 3개 PASS, capture script bash 문법·git diff 검사 PASS |
+
+Room 캐시 검사 13개는 실제 v1 schema JSON→v2 migration의 UNKNOWN/SENDING/SENT 보존·추가 nullable 실행 ID·schema 검증, 늦은 과거 snapshot, 12개 동시 snapshot/반복 이벤트, 빈 새 실행 snapshot/sequence·서버 ID 재사용, 계정·방/늦은 원래 계정 결과 격리, cache+receipt 원자적 수락·같은 UI key·늦은 실패, snapshot 충돌 transaction rollback, 잘못된 room/namespace 차단, pending 정렬/다른 sender 같은 client ID, 파일 DB 재열기, 실제 Flow의 pending/accepted 단일 행 전환, 새 서버 수락의 과거 SENT 보존, 논리 ID/sequence unique 충돌 검사를 포함한다. 이전 메모리 병합 함수를 제거하면서 해당 중복·순서 검증은 실제 DB 검사로 옮겼고, 현재 JVM 검사는 transient 화면 상태만 검사한다.
+
+### 검토 관점과 경계
+
+구현 이후 데이터 흐름·접근 검사·중복 키·오류 표시를 별도로 다시 읽었다. 수신 캐시 owner와 sender를 분리했고, 캐시 삽입과 자신의 수락 receipt를 같은 transaction으로 묶었다. 화면 네트워크 콜백의 목록 변경과 기존 hybrid 병합은 제거했다. immutable 동일 키 충돌·본문/sequence 변경은 덮어쓰지 않으며 transaction 실패를 표시한다. 새 서버 실행은 과거 receipt를 바꾸지 않는다. HTTP timeout/DB 저장 실패 시에도 결과를 섣불리 SENT로 표시하지 않는다. Room Flow의 accepted row만 해당 송신 오류를 해제하고 연결/저장 오류는 따로 유지한다.
+
+현재 정렬은 클라이언트의 실행 그룹 첫 관찰 순서 + 그룹 안 sequence이며 전역 시간순이 아니다. snapshot에서 사라진 캐시를 삭제하지 않으므로 오래된 실행 기록도 남는다. 이는 기기가 관찰한 기록이며 완전한 서버 history나 서버 영속성 보장은 아니다. 실제 인증은 여전히 local X-Test-User이고 HTTP/WS 접근 검사는 기존 실제 loopback 테스트로 검증했다.
+
+### 실패 후 해결
+
+- 새 테스트에서 RoomDatabase가 Closeable이라는 가정으로 컴파일이 실패했다. 테스트 전용 try/finally close helper로 고친 뒤 전체 빌드·최종 21 DB 검사를 통과했다.
+- 최종 instrumentation과 초기 수동 캡처가 겹쳤으며 테스트 도구 종료 시 대상 APK가 제거돼 offline start에서 Activity 없음이 발생했다. 테스트 종료 후 APK 재설치→새 데모 fixture→online/offline/restart/final DB 캡처를 순서대로 다시 수집했다. 통과 근거는 이 최종 캡처다. 실제 APK 제거는 테스트 harness 동작이며 작업에서 `pm clear`를 실행하지 않았다.
+- cold start 직후 pidof가 아직 빈 값을 반환해 묶음 검증을 중단했다. 화면을 먼저 관찰한 뒤 새 PID를 확인했다. Bob sender 라벨과 신원 Chip의 텍스트가 같아 초기 자동 tap도 중단됐고, 신원 Chip을 구분해 재실행했다. 이 중단을 통과로 계산하지 않았다.
+
+### 재현 가능한 자료와 미실행
+
+실행 방법은 [README](README.md#실행), 예측·오프라인 재실행·사용자가 직접 추가할 테스트는 [15분 실습](CACHE_EXERCISE.md)에 있다. 이 작업 서버와 읽기 전용 Pixel_8a는 검증 후 종료한다. 기기/서버는 다음 실행에서 새 fixture로 재현하며, 이번 실제 UI XML/PNG·PID·DB/WAL·로그는 `evidence/cache/`에 남는다. 읽기 전용 AVD의 임시 앱 데이터를 다음 AVD 실행의 영속 데이터로 취급하지 않는다. 공개 Git에는 DB 내용·실행 로그·machine SDK 설정을 넣지 않는다. schema1/2 JSON만 관리한다.
+
+```bash
+python3 scripts/verify-cache-evidence.py
+# 기기 앱을 종료한 뒤 이번 캐시 DB만 캡처할 때:
+CHAT_EVIDENCE_GROUP=cache bash scripts/capture-outbox-db.sh <serial> <label>
+```
+
+`build-verification-final.log`, `room-verification-final.log`, `evidence-verification.log`와 모듈 JUnit XML/lint 보고서가 검사 근거다. final DB와 현재 서버 history의 개수가 다른 이유는 이전 서버 실행의 두 캐시 행을 의도대로 보존했기 때문이다.
+
+실기기·두 Android 동시 실행·UI instrumentation·release 빌드·디스크 손상/용량 부족 주입·ViewModel generation 경쟁 자동 검사는 미실행이다. 실제 한 Android 세션 + Ktor Bob WS peer를 사용했다. ACK 프록시 통합과 기존 outbox DB 검사는 재실행했지만 이번 최종 APK로 BOTH/HTTP-only 수동 유실 데모는 반복하지 않았다. 자동 retry/reconnect·서버 DB·cursor 과거 페이징·누락 보충은 추가하지 않았다. 다음 한 가지는 실행 UUID를 포함하는 cursor의 과거 조회/실시간 중복·누락 경계를 직접 검증하는 것이다.

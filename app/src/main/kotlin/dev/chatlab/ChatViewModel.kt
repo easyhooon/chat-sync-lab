@@ -19,7 +19,8 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.serialization.json.Json
 
-class ChatViewModel(private val outbox: OutboxStore, private val labMode: LabMode = LabMode.DIRECT) : ViewModel() {
+class ChatViewModel(private val outbox: OutboxStore, private val messages: MessageCacheStore, private val labMode: LabMode = LabMode.DIRECT) : ViewModel() {
+    private class CacheWriteFailure(cause: Exception) : Exception(cause)
     private val json = Json { ignoreUnknownKeys = true }
     private val client = HttpClient(OkHttp) {
         install(ContentNegotiation) { json(json) }
@@ -47,9 +48,7 @@ class ChatViewModel(private val outbox: OutboxStore, private val labMode: LabMod
         sessionJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 val recovered = outbox.initialize()
-                val stored = outbox.load(user, room)
-                updateFor(token) { it.copy(messages = mergeOutbox(it.messages, stored.map(OutboxEntry::row)), outboxReady = true, connection = "연결 중") }
-                Log.i("ChatLab", "OUTBOX_RESTORED user=$user room=$room rows=${stored.size} recoveredSending=$recovered")
+                Log.i("ChatLab", "OUTBOX_RECOVERED user=$user room=$room recoveredSending=$recovered")
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (error: Exception) {
                 Log.e("ChatLab", "Outbox restore failed", error)
@@ -57,17 +56,38 @@ class ChatViewModel(private val outbox: OutboxStore, private val labMode: LabMod
                 return@launch
             }
             coroutineScope {
+                val databaseReady = CompletableDeferred<Unit>()
                 launch {
                     try {
-                        outbox.observe(user, room).collect { stored ->
-                            updateFor(token) { it.copy(messages = mergeOutbox(it.messages, stored.map(OutboxEntry::row))) }
+                        messages.observe(user, room).collect { rows ->
+                            updateFor(token) { withDatabaseRows(it, rows).copy(outboxReady = true) }
+                            if (!databaseReady.isCompleted) {
+                                Log.i("ChatLab", "CACHE_RESTORED user=$user room=$room rows=${rows.size}")
+                                updateFor(token) { it.copy(connection = "연결 중") }
+                                databaseReady.complete(Unit)
+                            }
                         }
                     } catch (cancelled: CancellationException) { throw cancelled }
                     catch (error: Exception) {
-                        Log.e("ChatLab", "Outbox observation failed", error)
+                        Log.e("ChatLab", "Message observation failed", error)
                         updateFor(token) { it.copy(connected = false, connection = "연결 끊김", outboxReady = false,
                             error = UiError("로컬 기록 갱신을 확인하지 못했습니다. 다시 연결하세요.")) }
-                        this@coroutineScope.cancel("Outbox observation failed")
+                        this@coroutineScope.cancel("Message observation failed")
+                    }
+                }
+                databaseReady.await()
+                // GET and WebSocket may arrive in either order. Both only add to the same cache.
+                launch {
+                    try {
+                        val response = client.get("http://127.0.0.1:${labMode.port}/rooms/$room/messages") { header("X-Test-User", user) }
+                        check(response.status.isSuccess()) { "History HTTP ${response.status.value}" }
+                        val history = response.body<History>()
+                        messages.importSnapshot(user, room, history.serverInstanceId, history.messages)
+                        Log.i("ChatLab", "HISTORY_CACHED user=$user room=$room rows=${history.messages.size} instance=${history.serverInstanceId}")
+                    } catch (cancelled: CancellationException) { throw cancelled }
+                    catch (error: Exception) {
+                        Log.w("ChatLab", "History fetch/cache failed", error)
+                        updateFor(token) { it.copy(error = UiError("서버 기록 조회/저장 실패. 저장된 기록을 표시합니다. 다시 연결하세요.")) }
                     }
                 }
                 try {
@@ -78,20 +98,12 @@ class ChatViewModel(private val outbox: OutboxStore, private val labMode: LabMod
                             if (token != generation) continue
                             when (event.type) {
                                 "snapshot" -> {
-                                    val messages = requireNotNull(event.messages).filter { it.roomId == room }
-                                    var persistenceError: UiError? = null
-                                    try { outbox.acceptSnapshot(user, room, messages) }
-                                    catch (cancelled: CancellationException) { throw cancelled }
-                                    catch (error: Exception) {
-                                        Log.e("ChatLab", "Snapshot receipt save failed", error)
-                                        persistenceError = UiError("서버 기록은 받았지만 로컬 수락 기록 저장에 실패했습니다. 다시 연결해 확인하세요.")
-                                    }
-                                    updateFor(token) { it.copy(connected = true, connection = "연결됨", error = persistenceError,
-                                        messages = mergeSnapshot(it.messages, messages)) }
+                                    messages.importSnapshot(user, room, requireNotNull(event.serverInstanceId), requireNotNull(event.messages))
+                                    updateFor(token) { it.copy(connected = true, connection = "연결됨") }
+                                    Log.i("ChatLab", "SNAPSHOT_CACHED user=$user room=$room rows=${event.messages.size} instance=${event.serverInstanceId}")
                                 }
                                 "message" -> {
                                     val message = requireNotNull(event.message)
-                                    if (message.roomId != room) continue
                                     acceptKnown(user, room, message, token)
                                     Log.i("ChatLab", "WS receive sender=${message.senderId} sequence=${message.sequence} id=${message.id} clientId=${message.clientMessageId} text=${message.text}")
                                 }
@@ -102,7 +114,7 @@ class ChatViewModel(private val outbox: OutboxStore, private val labMode: LabMod
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (error: Exception) {
                     Log.w("ChatLab", "WebSocket failed", error)
-                    connectionLost(token, "서버 연결 실패. 서버 실행과 adb reverse를 확인하고 다시 연결하세요.")
+                    connectionLost(token, "실시간 연결/기록 저장 실패. 저장된 기록을 표시합니다. 서버와 adb reverse를 확인하고 다시 연결하세요.")
                 }
             }
         }
@@ -168,20 +180,19 @@ class ChatViewModel(private val outbox: OutboxStore, private val labMode: LabMod
     }
 
     private suspend fun acceptKnown(user: String, room: String, message: Message, token: Int) {
-        var persistenceError: UiError? = null
-        try { outbox.accept(user, room, message) }
+        try { messages.importMessage(user, room, message) }
         catch (cancelled: CancellationException) { throw cancelled }
         catch (error: Exception) {
-            Log.e("ChatLab", "Acceptance receipt save failed", error)
-            persistenceError = UiError("서버 수락은 확인했지만 로컬 기록 저장에 실패했습니다. 다시 연결해 확인하세요.")
+            Log.e("ChatLab", "Accepted message cache save failed", error)
+            updateFor(token) { it.copy(error = UiError("서버 수락은 받았지만 로컬 기록 저장에 실패했습니다. 다시 연결해 확인하세요.")) }
+            throw CacheWriteFailure(error)
         }
-        updateFor(token) { acceptMessage(it, message).let { accepted -> if (persistenceError != null) accepted.copy(error = persistenceError) else accepted } }
     }
 
     private suspend fun persistUnconfirmed(entry: OutboxEntry, status: SendStatus, token: Int, reason: String) {
         try {
             val changed = outbox.unconfirmed(entry.userId, entry.roomId, entry.clientMessageId, status)
-            if (changed == 1) updateFor(token) { recordSendError(it, entry.clientMessageId, status, reason) }
+            if (changed == 1) updateFor(token) { withSendError(it, entry.clientMessageId, reason) }
             val stored = outbox.load(entry.userId, entry.roomId).firstOrNull { it.clientMessageId == entry.clientMessageId }
             Log.i("ChatLab", "HTTP timeout/error user=${entry.userId} room=${entry.roomId} clientId=${entry.clientMessageId} resultingStatus=${stored?.status}")
         } catch (cancelled: CancellationException) { throw cancelled }
@@ -215,6 +226,9 @@ class ChatViewModel(private val outbox: OutboxStore, private val labMode: LabMod
                 persistUnconfirmed(entry, status, token, apiError.message)
             }
         } catch (cancelled: CancellationException) { cleanupCancelled(entry); throw cancelled }
+        catch (error: CacheWriteFailure) {
+            persistUnconfirmed(entry, SendStatus.UNKNOWN, token, "서버 수락은 받았지만 로컬 기록 저장에 실패했습니다. 다시 연결해 확인하세요.")
+        }
         catch (error: Exception) {
             Log.w("ChatLab", "HTTP outcome unknown", error)
             persistUnconfirmed(entry, SendStatus.UNKNOWN, token, "전송 결과 미확인. 같은 ID로 재시도하거나 다시 연결해 기록을 확인하세요.")

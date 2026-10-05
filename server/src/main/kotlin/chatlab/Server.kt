@@ -38,7 +38,7 @@ fun Application.chatModule(store: ChatStore = ChatStore()) {
         get("/health") { call.respond(mapOf("status" to "ok")) }
         route("/rooms/{roomId}") {
             install(roomAccess)
-            get("/messages") { call.respond(History(store.history(call.parameters["roomId"]!!))) }
+            get("/messages") { call.respond(History(store.history(call.parameters["roomId"]!!), store.serverInstanceId)) }
             post("/messages") {
                 val accepted = store.append(call.request.header("X-Test-User")!!, call.parameters["roomId"]!!, call.receive<SendMessage>())
                 call.respond(if (accepted.isNew) HttpStatusCode.Created else HttpStatusCode.OK, accepted.message)
