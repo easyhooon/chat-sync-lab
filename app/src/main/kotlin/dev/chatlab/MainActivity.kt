@@ -28,6 +28,7 @@ class MainActivity : ComponentActivity() {
                 "both" -> LabMode.BOTH_LOST
                 "http-only" -> LabMode.HTTP_LOST
                 "page-failure" -> LabMode.PAGE_FAILURE
+                "catch-up" -> LabMode.CATCH_UP_FAILURE
                 else -> LabMode.DIRECT
             } else LabMode.DIRECT
             ChatViewModel((application as ChatApplication).foregroundSession, mode)
@@ -35,6 +36,9 @@ class MainActivity : ComponentActivity() {
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (BuildConfig.DEBUG && BuildConfig.CHAT_FCM_ENABLED) intent.getStringExtra("fcm_test_account")?.let {
+            (application as ChatApplication).fcmRegistration.registerForApprovedLocalTest(it)
+        }
         setContent { MaterialTheme { ChatRoute(chatViewModel) } }
     }
 }
@@ -104,6 +108,13 @@ fun ChatScreen(state: ChatState, rows: LazyPagingItems<MessageRow>, onSelectUser
             }
             if (!state.connected) OutlinedButton(onClick = onReconnect) { Text("다시 연결") }
             state.error?.let { Text(it.message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            if (state.catchingUp) Text("빠진 기록 확인 중 · ${state.confirmedSequence ?: 0}/${state.syncTarget ?: 0}", style = MaterialTheme.typography.labelSmall)
+            state.catchUpError?.let { message ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(message, modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    TextButton(onClick = onReconnect) { Text("누락 복구 재시도") }
+                }
+            }
             if (cacheReadFailed) Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("기기 기록 읽기 실패", color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
                 TextButton(onClick = { rows.retry() }) { Text("기기 기록 다시 읽기") }

@@ -26,7 +26,7 @@ tasks.register<JavaExec>("demoClient") {
 }
 tasks.register<JavaExec>("ackLossProxy") {
     group = "verification"
-    description = "Local test-only proxy; -Pscenario=both, http-only, or page-failure"
+    description = "Local test-only proxy; -Pscenario=both, http-only, page-failure, or catch-up"
     classpath = sourceSets.test.get().runtimeClasspath
     mainClass.set("chatlab.AckLossProxyKt")
     dependsOn(tasks.testClasses)

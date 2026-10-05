@@ -14,10 +14,11 @@ import java.util.concurrent.TimeUnit
 import kotlinx.serialization.json.Json
 
 // All incoming transports share this repository and Room merge. HTTP responses never become UI rows.
-class ChatRepository(val outbox: OutboxStore, val cache: MessageCacheStore) {
+class ChatRepository(val outbox: OutboxStore, val cache: MessageCacheStore, providedClient: HttpClient? = null) {
     data class SendOutcome(val status: Int, val message: Message? = null, val error: ApiError? = null)
     private val json = Json { ignoreUnknownKeys = true }
-    private val client = HttpClient(OkHttp) {
+    val sync = SyncCoordinator(this)
+    private val client = providedClient ?: HttpClient(OkHttp) {
         install(ContentNegotiation) { json(json) }
         install(WebSockets)
         install(HttpTimeout) { requestTimeoutMillis = 8000; connectTimeoutMillis = 5000 }
@@ -25,6 +26,20 @@ class ChatRepository(val outbox: OutboxStore, val cache: MessageCacheStore) {
     }
     suspend fun receive(owner: String, room: String, message: Message) = cache.importMessage(owner, room, message)
     suspend fun latest(owner: String, room: String, page: History) = cache.importLatestPage(owner, room, page)
+    suspend fun latestHttp(owner: String, room: String, port: Int): History {
+        val response = client.get("http://127.0.0.1:$port/rooms/$room/messages") { header("X-Test-User", owner); parameter("limit", 20) }
+        check(response.status.isSuccess()) { "History bootstrap failed: ${response.status.value}" }
+        return response.body()
+    }
+    suspend fun after(cursor: SyncCursor, port: Int) {
+        val response = client.get("http://127.0.0.1:$port/rooms/${cursor.roomId}/messages") {
+            header("X-Test-User", cursor.ownerId); parameter("limit", 20)
+            parameter("after", cursor.contiguousThrough); parameter("serverInstanceId", cursor.serverInstanceId)
+            parameter("through", cursor.requestedThrough)
+        }
+        if (!response.status.isSuccess()) error("Catch-up HTTP ${response.status.value}")
+        cache.importAfterPage(cursor, response.body())
+    }
     suspend fun older(key: HistoryKey, port: Int) {
         val response = client.get("http://127.0.0.1:$port/rooms/${key.roomId}/messages") {
             header("X-Test-User", key.ownerId)

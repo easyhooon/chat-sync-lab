@@ -38,7 +38,7 @@ class ForegroundChatSession(private val repository: ChatRepository) {
         if (!foreground) return
         foreground = false
         disconnect()
-        mutableState.update { it.copy(connection = "백그라운드", catchUpRequired = true) }
+        mutableState.update { it.copy(connection = "백그라운드", catchUpRequired = true, catchingUp = false) }
         Log.i("ChatLab", "PROCESS_BACKGROUND socketStopped generation=$generation")
     }
     private val mutableState = MutableStateFlow(ChatState(labMode = labMode))
@@ -55,7 +55,7 @@ class ForegroundChatSession(private val repository: ChatRepository) {
         val token = generation
         val room = state.value.roomId
         mutableState.update { old ->
-            if (old.user == user) old.copy(connection = "로컬 기록 복원 중", error = null, outboxReady = false, historyInstance = null, loadingOlder = false, olderError = null, historyEnd = false)
+            if (old.user == user) old.copy(connection = "로컬 기록 복원 중", error = null, outboxReady = false, historyInstance = null, loadingOlder = false, olderError = null, historyEnd = false, catchUpRequired = true, catchingUp = false, catchUpError = null, confirmedSequence = null, syncTarget = null)
             else ChatState(user = user, roomId = room, connection = "로컬 기록 복원 중", labMode = labMode)
         }
         if (!foreground) return
@@ -70,6 +70,28 @@ class ForegroundChatSession(private val repository: ChatRepository) {
                 return@launch
             }
             coroutineScope {
+                val syncRequests = kotlinx.coroutines.channels.Channel<String>(kotlinx.coroutines.channels.Channel.CONFLATED)
+                val sessionPort = labMode.port
+                launch {
+                    for (instance in syncRequests) {
+                        try {
+                            val result = repository.sync.catchUp(user, room, instance, sessionPort) { position ->
+                                updateFor(token) { it.copy(catchingUp = position.contiguousThrough < position.requestedThrough,
+                                    catchUpRequired = position.contiguousThrough < position.requestedThrough, catchUpError = null,
+                                    confirmedSequence = position.contiguousThrough, syncTarget = position.requestedThrough) }
+                                Log.i("ChatLab", "SYNC_POSITION user=$user run=$instance base=${position.baseSequence} confirmed=${position.contiguousThrough} target=${position.requestedThrough}")
+                            }
+                            updateFor(token) { it.copy(catchingUp = false, catchUpRequired = false, catchUpError = null,
+                                confirmedSequence = result.contiguousThrough, syncTarget = result.requestedThrough) }
+                            Log.i("ChatLab", "CATCH_UP_COMPLETE user=$user run=$instance confirmed=${result.contiguousThrough}")
+                        } catch (cancelled: CancellationException) { throw cancelled }
+                        catch (error: Exception) {
+                            Log.w("ChatLab", "Catch-up interrupted; committed cursor retained", error)
+                            updateFor(token) { it.copy(catchingUp = false, catchUpRequired = true,
+                                catchUpError = "빠진 기록 확인에 실패했습니다. 받은 기록은 유지됩니다. 다시 연결하세요.") }
+                        }
+                    }
+                }
                 val databaseReady = CompletableDeferred<Unit>()
                 launch {
                     try {
@@ -93,7 +115,7 @@ class ForegroundChatSession(private val repository: ChatRepository) {
                 databaseReady.await()
                 try {
                     Log.i("ChatLab", "WS_START user=$user room=$room generation=$token")
-                    repository.events(user, room, labMode.port) { event ->
+                    repository.events(user, room, sessionPort) { event ->
                         if (token == generation && foreground) when (event.type) {
                             "snapshot" -> {
                                 val page = requireNotNull(event.page)
@@ -101,11 +123,13 @@ class ForegroundChatSession(private val repository: ChatRepository) {
                                 val key = requireNotNull(messages.historyKey(user, room, page.serverInstanceId))
                                 updateFor(token) { it.copy(connected = true, connection = "연결됨",
                                     historyInstance = page.serverInstanceId, historyEnd = key.endReached) }
+                                syncRequests.trySend(page.serverInstanceId)
                                 Log.i("ChatLab", "BOOTSTRAP_CACHED user=$user rows=${page.messages.size} highWatermark=${page.highWatermark} end=${key.endReached}")
                             }
                             "message" -> {
                                 val message = requireNotNull(event.message)
                                 acceptKnown(user, room, message, token)
+                                syncRequests.trySend(message.serverInstanceId)
                                 Log.i("ChatLab", "WS receive sender=${message.senderId} sequence=${message.sequence} id=${message.id} clientId=${message.clientMessageId} text=${message.text}")
                             }
                         }

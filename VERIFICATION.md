@@ -236,3 +236,54 @@ CHAT_EVIDENCE_GROUP=paging bash scripts/capture-outbox-db.sh <serial> <label>
 이 작업의 서버·프록시·읽기 전용 AVD는 종료한다. 종료한 read-only AVD의 앱 데이터를 다음 실행의 영속 DB로 취급하지 않는다. 기기/서버를 새로 시작하고 로컬 fixture로 재현한다.
 
 실제 FCM·알림 권한 거절·배경 Push delivery·OS 메모리 kill 후 FCM wake-up·실기기·두 Android 동시 채팅·release APK·디스크 손상/용량 부족 주입은 미실행이다. 배경동안 **두 개** 기록의 복귀 수신은 확인했으나 최신20개를 넘는 자동 누락 보충은 구현/검증하지 않았다. NeedsCatchUp은 내구성 있는 sync queue가 아니다. 서버는 메모리이며 테스트 헤더는 제품 인증이 아니다. [배경 계약](BACKGROUND_CONTRACT.md)에 최소 연결 입력 및 force-stop/OS kill 차이를 남겼다. 다음 한 가지는 연속 확인 지점 이후의 bounded after catch-up이다.
+
+## 여섯 번째 단위: 연속 확인 지점·자동 after 복구·FID 준비 — 2026-10-05 UTC
+
+착수 checkout은 `05e11dccf08774fb899d498300c9a2b62fe4fb25`이며 local/remote main이 일치했다. 기존 Mac/SDK/AVD를 관찰하고 다른 실행 기기가 없는 상태에서 채팅 전용 emulator-5554만 사용했다. 모든 instrumentation에 ANDROID_SERIAL와 android.injected.device.serial을 함께 지정했다. 공식 프로젝트 의존성으로 Messaging25.1.3, WorkManager2.11.2, Google services plugin4.5.0을 추가했다. 시스템 도구 설치·기존 저장소 수정·외부 에이전트 전송은 없다.
+
+| 검사 | 최종 실제 결과 |
+|---|---|
+| 서버 unit/loopback 통합 | 17 tests, failures/errors/skips0. after 고정 target/20개, 입력·방·실행 접근, FID 단일 target serializer, 실제 프록시 두 번째 after503/같은 위치 retry/live 경계 포함 |
+| Android JVM | 8 tests, failures/errors/skips0. 기존6 + FCM hint 입력/receipt ID 출력 차단2 |
+| Android API34 instrumentation | 42 tests, failures/errors/skips0, 최종18초. 기존32 + catch-up DB/coordinator8 + FCM binding/기본 초기화 차단2 |
+| APK·test APK·server installDist | 빌드 성공. 최종 앱 소스 JVM/APK/lint 재검사 성공 |
+| lint | errors0, warnings20. 기존 target/backup/icon3, 의존성 안내15, UseKtx2. legacy onNewToken lint는 실제 FID onRegistered 계약을 설명한 좁은 suppress 적용 |
+| 첫 기준점 | 서버85개, 실제 앱 최신 #66–#85만20개. Room base65/contiguous85/target85 |
+| 배경/복귀120개 누락 | PROCESS_BACKGROUND socketStopped 뒤 #86–#205 추가. 복귀 tail #186–#205가 저장돼도 confirmed85/target205 |
+| 중간503·DB 경계 | after85 #86–#105 commit 뒤 after105만503. 오류/재시도 UI. partial DB는60행(#66–#105 + #186–#205), base65/confirmed105/target205. max(sequence)=205를 confirmed로 취급하지 않음 |
+| 새 프로세스 이어받기 | PID10382→10499. 요청 after85→105(503)→105→125→145→165. 첫 재개는 저장된105, cursor regression/자동 POST 재전송 없음 |
+| HTTP 중 WS 높은 번호 | after105/through205 요청 중 WS #206(23:14:37.114) → 첫 페이지 commit 뒤 confirmed125/target206(38.346). 다음 요청은 through206. 끝에서 cached tail과 연결되어 confirmed206 |
+| 최종 서버/DB 대조 | HTTP 전체 history206개 중 base65 이후 #66–#206의141개가 Alice 캐시와 ID/clientID/본문/sender/시각/실행/순서 모두 일치. UI stable key141개 unique. 자기 outbox0개인 수신 전용 fixture |
+| before 독립 | partial/recovered의 nextBefore·oldest186·end=false 동일. after가 before key를 소비하지 않음. #1–#65는 자동 복구 범위 밖 |
+| 오프라인 Paging | 자신의 서버/proxy 종료·reverse 제거 뒤 새 프로세스. 실제 missed097–100(#182–#185)이 화면에 표시되어 복귀 latest20개 밖의 복구 행을 Room에서 읽음. outbox/cache_sessions/cached_messages/history_keys/sync_cursors/sync_hints 여섯 테이블 모든 필드 동일 |
+| 실제 알림 거절 분기 | API34 자신의 APK의 POST_NOTIFICATIONS 거절 상태에서 durable hint/target 보존과 showIfAllowed=false 검사. 원래 허용 상태면 검사 후 복원. 외부 FCM 전달 검사는 아님 |
+| FCM 기본 차단 | 실제 FirebaseApp 목록 비어 있음, CHAT_FCM_ENABLED=false에서 등록 호출 거절·binding 미생성. merged manifest의 FirebaseInitProvider 제거 확인. 설정 없는 opt-in 빌드는 의도대로 실패 |
+| CLI 상태 | 기존 Firebase CLI15.10.0, 로그인 계정1개, projects:list 성공/접근35개. 이메일·인증정보 미출력. 앱 생성·설정 다운로드·등록·외부 sender 실행 없음 |
+| 증거 대조 | verify-catch-up-evidence.py 5PASS, Python/bash 문법·git diff 검사 |
+
+추가 DB 검사는 높은 Push/WS가 bootstrap보다 먼저 도착해도 기준을 만들지 않는 경우, 역순81/82, 동시10개 coordinator 합류·live201·늦은 중복, 여러 페이지 중단/파일 DB 재열기, malformed gap/immutable conflict의 receipt+cursor rollback, 계정·서버 실행·늦은 원래 scope 병합, 실제 v3 schema→v4 migration, hint 내구성과 알림 거절을 확인한다. 보강한 cancellation 검사는 첫 after commit 전 취소는 confirmed20/UNKNOWN 유지, 첫 페이지 commit 후 다음 요청 중 취소는 confirmed40/SENT 유지, 재개 after40 및 Bob 분리/자기 stable key를 검사한다. 실제 foreground 세션의 gate를 둔 UI generation 취소 경쟁은 실습의 사용자 추가 과제로 남는다.
+
+### 실패 뒤 해결과 해석
+
+- 첫 Firebase 컴파일은 getInstance(FirebaseApp)이 public이라고 가정해 실패했다. 실제25.1.3 API를 javap로 확인하고 default FirebaseApp + public getInstance()/register()/onRegistered를 사용해 수정했다. 현재 SDK는 FID API를 지원하며 token fallback을 추가하지 않았다.
+- 새 DB 검사 첫 컴파일은 HttpResponseData import/혼합 SQLite binding array type이 없어 실패했다. 명시 import/arrayOf<Any>로 수정한 뒤 빌드·기기 검사 통과했다.
+- 첫41개는40통과/1실패였다. before 키 전체 불변을 기대한 검사가 live201에 의한 정상 highWatermark 확장을 실패로 계산했다. nextBefore/oldest/end는 불변이고 highWatermark는201인 것을 분리해 수정했다. 이후41개 전체 통과, cancellation 보강 뒤 최종42개 전체 통과했다.
+- 증거 스크립트의 첫 실행은 WS206 직후 confirmed105/target206 로그가 있다고 가정해 실패했다. progress 로그는 HTTP commit 뒤 남아 confirmed125/target206이며, WS206이 먼저였음을 실제 시간순으로 검증하도록 고쳤다. 처음 오프라인3회 swipe는 latest20 안에 머물렀다. 관찰한 목록 bounds로7회 이동하여 최종 #182–#185를 확인했다. 처음 캡처/실패 스크립트를 완료 근거로 사용하지 않았다.
+- `-PchatFcmEnabled=true`를 설정 없이 실행한 실패는 보호 장치의 기대 결과다. 실제 FCM SDK 등록/외부 전달 실패라고 계산하지 않는다.
+
+### 검토·근거·남은 범위
+
+구현 이후 데이터 흐름·scope/권한·중복·오류를 따로 검토했다. 서버 접근 검사 뒤 cursor를 해석하고 after target은 요청 범위에 고정한다. Room은 sequence 바로 다음 실제 행만으로 contiguous를 전진시킨다. before와 after 키를 분리하고 동일 transaction에서 본문/자기 outbox receipt/연속 cursor를 갱신한다. 늦은 유효한 원래 scope의 응답은 보존되며 새로운 UI 계정이나 서버 실행으로 옮기지 않는다. coroutine 취소는 기존 commit을 되돌리지 않는다. 오류는 받은 기록과 별도로 표시한다.
+
+FCM 준비는 SDK onRegistered receipt만 사용하며 FIS.getId/Task 성공을 등록 완료로 오인하지 않는다. binding은 UI Chip과 독립이며 FID는 private preferences에만 둔다. 로그/화면/Git에 ID/인증키를 출력하지 않는다. Service는 짧은 hint 저장 후 HTTP-only worker를 예약한다. 서버의 FID serializer는 순수 body 생성 코드이며 자격증명·네트워크 sender·서버 registration 저장 API는 없다.
+
+로컬 `evidence/catch-up/`에는 build-final/review-build/server-final/room-final 로그, server-junit17/JVM-junit8/final-room-results42, lint XML, SDK public-api 검사, CLI 읽기 전용 요약, initial20/partial/recovered/offline DB+WAL, UI XML/PNG, proxy/Android 로그, history206 JSON, PID, evidence-verification.log가 있다. 최초 컴파일/검사 실패와41개 통과도 별도 보존한다. 공개 Git에는 schema v1–v4·소스·검사·실습만 관리하고 DB/화면/로그/설정은 제외한다.
+
+```bash
+python3 scripts/verify-catch-up-evidence.py
+CHAT_EVIDENCE_GROUP=catch-up bash scripts/capture-outbox-db.sh <serial> <label>
+```
+
+이 작업의 loopback 서버·프록시·read-only AVD만 종료한다. 다음 실행은 [실습](CATCH_UP_EXERCISE.md)의 새 합성 fixture로 재현한다. 종료한 read-only AVD의 앱 데이터가 다음 실행에 남는다고 주장하지 않는다.
+
+실제 FCM 프로젝트 설정/앱 등록/SDK onRegistered/배경 data delivery/알림 허용 UX/외부 sender/OS kill 후 wake-up은 미실행이다. 실기기·두 Android 채팅·release APK·서버 영속 DB·자동 reconnect 백오프도 미실행이다. 프로젝트 생성/선택·dev.chatlab 등록·지정 기기/신원·발송 경로 승인을 기다리며 준비된 FID 경로로 실제 배경 수신을 다음 한 가지로 검증한다. 메모리 서버와 로컬 테스트 헤더의 한계는 그대로다.

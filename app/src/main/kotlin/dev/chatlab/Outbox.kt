@@ -60,13 +60,14 @@ abstract class OutboxDao {
     abstract suspend fun accept(user: String, room: String, id: String, text: String, serverId: String, sequence: Long, instance: String): Int
 }
 
-@Database(entities = [OutboxEntry::class, CachedMessage::class, CacheSession::class, HistoryKey::class], version = 3,
-    exportSchema = true, autoMigrations = [AutoMigration(from = 1, to = 2), AutoMigration(from = 2, to = 3)])
+@Database(entities = [OutboxEntry::class, CachedMessage::class, CacheSession::class, HistoryKey::class, SyncCursor::class, SyncHint::class], version = 4,
+    exportSchema = true, autoMigrations = [AutoMigration(from = 1, to = 2), AutoMigration(from = 2, to = 3), AutoMigration(from = 3, to = 4)])
 @TypeConverters(OutboxConverters::class)
 abstract class OutboxDatabase : RoomDatabase() {
     abstract fun outbox(): OutboxDao
     abstract fun messages(): MessageDao
     abstract fun historyKeys(): HistoryKeyDao
+    abstract fun sync(): SyncDao
 
     companion object {
         fun open(context: Context) = Room.databaseBuilder(context.applicationContext, OutboxDatabase::class.java, "chat-outbox.db").build()
@@ -112,6 +113,10 @@ class ChatApplication : Application() {
     val messages by lazy { MessageCacheStore(database, outbox) }
     val repository by lazy { ChatRepository(outbox, messages) }
     val foregroundSession by lazy { ForegroundChatSession(repository) }
+    val fcmBinding by lazy { FcmBindingStore(this) }
+    val fcmRegistration by lazy { FcmRegistrationController(this, fcmBinding) }
+    val pushScheduler by lazy { PushSyncScheduler(this) }
+    val chatNotifications by lazy { ChatNotifications(this) }
     val localPushAdapter by lazy { LocalPushAdapter(repository) }
     override fun onCreate() {
         super.onCreate()

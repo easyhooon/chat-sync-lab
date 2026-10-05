@@ -7,12 +7,14 @@ data class Message(val id: String, val clientMessageId: String, val roomId: Stri
     val text: String, val sequence: Long, val createdAt: String, val serverInstanceId: String)
 @Serializable data class History(val messages: List<Message>, val serverInstanceId: String, val roomId: String,
     val nextBefore: String?, val endOfHistory: Boolean, val highWatermark: Long)
+@Serializable data class AfterPage(val messages: List<Message>, val serverInstanceId: String, val roomId: String,
+    val afterSequence: Long, val nextAfter: Long, val throughSequence: Long, val endOfCatchUp: Boolean)
 @Serializable data class SendMessage(val clientMessageId: String, val text: String)
 @Serializable data class Event(val type: String, val page: History? = null, val message: Message? = null)
 @Serializable data class ApiError(val code: String, val message: String)
 enum class SendStatus { SENDING, SENT, FAILED, UNKNOWN }
 enum class LabMode(val port: Int, val label: String) {
-    DIRECT(8080, ""), BOTH_LOST(8081, "HTTP + WS 수락 알림 유실 실험"), HTTP_LOST(8082, "HTTP만 유실 · WS 수락 확인 실험"), PAGE_FAILURE(8081, "과거 페이지 실패·재시도 실험");
+    DIRECT(8080, ""), BOTH_LOST(8081, "HTTP + WS 수락 알림 유실 실험"), HTTP_LOST(8082, "HTTP만 유실 · WS 수락 확인 실험"), PAGE_FAILURE(8081, "과거 페이지 실패·재시도 실험"), CATCH_UP_FAILURE(8081, "누락 복구 중단·이어받기 실험");
 }
 data class MessageRow(val clientMessageId: String, val senderId: String, val text: String,
     val serverId: String? = null, val sequence: Long? = null, val status: SendStatus = SendStatus.SENDING, val roomId: String = "demo",
@@ -21,7 +23,8 @@ data class UiError(val message: String, val clientMessageId: String? = null)
 data class ChatState(val user: String = "alice", val connection: String = "연결 끊김", val connected: Boolean = false,
     val sendRows: List<MessageRow> = emptyList(), val error: UiError? = null, val labMode: LabMode = LabMode.DIRECT,
     val roomId: String = "demo", val outboxReady: Boolean = false, val queueing: Boolean = false, val lastQueuedId: String? = null, val historyInstance: String? = null, val loadingOlder: Boolean = false,
-    val olderError: String? = null, val historyEnd: Boolean = false, val catchUpRequired: Boolean = false)
+    val olderError: String? = null, val historyEnd: Boolean = false, val catchUpRequired: Boolean = false, val catchingUp: Boolean = false, val catchUpError: String? = null,
+    val confirmedSequence: Long? = null, val syncTarget: Long? = null)
 
 // Message rows come only from Room. Keep transient errors independent of the stored list.
 fun withOutboxRows(state: ChatState, rows: List<MessageRow>): ChatState = state.copy(

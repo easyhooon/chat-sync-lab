@@ -33,7 +33,7 @@ def history():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('seed', 'append', 'history'))
+    parser.add_argument('action', choices=('seed', 'append', 'append-batch', 'history'))
     parser.add_argument('--count', type=int, default=85)
     parser.add_argument('--text', default='live-paging')
     args = parser.parse_args()
@@ -45,6 +45,10 @@ if __name__ == '__main__':
         result = [request(text=f'fixture-{number:03d}') for number in range(1, args.count + 1)]
     elif args.action == 'append':
         result = request(text=args.text)
+    elif args.action == 'append-batch':
+        if not 1 <= args.count <= 500:
+            parser.error('count must be 1..500')
+        result = [request(text=f'{args.text}-{number:03d}') for number in range(1, args.count + 1)]
     else:
         result = history()
     print(json.dumps(result, indent=2))

@@ -41,7 +41,18 @@ fun Application.chatModule(store: ChatStore = ChatStore()) {
             get("/messages") {
                 val limit = call.request.queryParameters["limit"]?.let { it.toIntOrNull()
                     ?: throw ChatError(400, "INVALID_LIMIT", "limit must be an integer") } ?: 20
-                call.respond(store.page(call.parameters["roomId"]!!, limit, call.request.queryParameters["before"]))
+                val before = call.request.queryParameters["before"]
+                val after = call.request.queryParameters["after"]
+                if (before != null && after != null) throw ChatError(400, "CURSOR_DIRECTION", "Use either before or after")
+                if (after == null) call.respond(store.page(call.parameters["roomId"]!!, limit, before))
+                else {
+                    val position = after.toLongOrNull() ?: throw ChatError(400, "INVALID_AFTER", "after must be a sequence")
+                    val instance = call.request.queryParameters["serverInstanceId"]
+                        ?: throw ChatError(400, "SERVER_RUN_REQUIRED", "after requires serverInstanceId")
+                    val through = call.request.queryParameters["through"]?.let { it.toLongOrNull()
+                        ?: throw ChatError(400, "INVALID_THROUGH", "through must be a sequence") }
+                    call.respond(store.afterPage(call.parameters["roomId"]!!, instance, position, through, limit))
+                }
             }
             post("/messages") {
                 val accepted = store.append(call.request.header("X-Test-User")!!, call.parameters["roomId"]!!, call.receive<SendMessage>())

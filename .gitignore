@@ -7,3 +7,9 @@ local.properties
 evidence/
 *.log
 .DS_Store
+__pycache__/
+
+# Firebase configuration/credentials stay local and are never committed.
+app/google-services.json
+app/src/**/google-services.json
+local-firebase/

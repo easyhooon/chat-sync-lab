@@ -18,6 +18,9 @@ data class Message(
 data class History(val messages: List<Message>, val serverInstanceId: String, val roomId: String,
     val nextBefore: String?, val endOfHistory: Boolean, val highWatermark: Long)
 @Serializable
+data class AfterPage(val messages: List<Message>, val serverInstanceId: String, val roomId: String,
+    val afterSequence: Long, val nextAfter: Long, val throughSequence: Long, val endOfCatchUp: Boolean)
+@Serializable
 data class BeforeCursor(val roomId: String, val serverInstanceId: String, val sequence: Long)
 @Serializable
 data class Event(val type: String, val page: History? = null, val message: Message? = null)
@@ -59,6 +62,19 @@ class ChatStore(private val members: Map<String, Set<String>> = mapOf("demo" to 
         val next = if (ended) null else Base64.getUrlEncoder().withoutPadding().encodeToString(
             Json.encodeToString(BeforeCursor.serializer(), BeforeCursor(room, serverInstanceId, selected.first().sequence)).toByteArray(Charsets.UTF_8))
         return History(selected, serverInstanceId, room, next, ended, all.lastOrNull()?.sequence ?: 0)
+    }
+
+    @Synchronized
+    fun afterPage(room: String, instance: String, after: Long, through: Long?, limit: Int = 20): AfterPage {
+        if (limit !in 1..50 || after < 0) throw ChatError(400, "INVALID_AFTER", "Invalid after position or limit")
+        if (instance != serverInstanceId) throw ChatError(409, "CURSOR_EXPIRED", "Server restarted; reconnect for a new baseline")
+        val all = messages[room].orEmpty()
+        val high = all.lastOrNull()?.sequence ?: 0
+        val target = through ?: high
+        if (target < after || target > high) throw ChatError(400, "INVALID_THROUGH", "through must be between after and the current room high watermark")
+        val selected = all.filter { it.sequence > after && it.sequence <= target }.take(limit)
+        val next = selected.lastOrNull()?.sequence ?: after
+        return AfterPage(selected, serverInstanceId, room, after, next, target, next == target)
     }
 
     @Synchronized

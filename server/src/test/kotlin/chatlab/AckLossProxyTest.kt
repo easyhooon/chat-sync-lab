@@ -18,6 +18,30 @@ import kotlinx.serialization.json.Json
 import kotlin.test.*
 
 class AckLossProxyTest {
+    @Test fun interruptedAfterPageRetriesCommittedBoundaryWithLiveOutsideFence() = runBlocking {
+        val store = ChatStore()
+        repeat(85) { store.append("bob", "demo", SendMessage(UUID.randomUUID().toString(), "before-$it")) }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = 0) { chatModule(store) }.start(false)
+        var proxy: EmbeddedServer<*, *>? = null
+        val client = HttpClient(CIO) { install(ContentNegotiation) { json() }; install(WebSockets) }
+        try {
+            val port = server.engine.resolvedConnectors().single().port
+            val started = embeddedServer(Netty, host = "127.0.0.1", port = 0) { ackLossProxyModule(AckLossMode.CATCH_UP_FAILURE, port) }.start(false)
+            proxy = started
+            val base="http://127.0.0.1:${started.engine.resolvedConnectors().single().port}/rooms/demo/messages"
+            val bootstrap=client.get(base){header("X-Test-User","alice")}.body<History>()
+            repeat(120){store.append("bob","demo",SendMessage(UUID.randomUUID().toString(),"missed-$it"))}
+            suspend fun after(position:Long)=client.get(base){header("X-Test-User","alice");parameter("after",position);parameter("through",205);parameter("serverInstanceId",bootstrap.serverInstanceId)}
+            val first=after(85).body<AfterPage>()
+            assertEquals((86L..105L).toList(),first.messages.map{it.sequence})
+            assertEquals(HttpStatusCode.ServiceUnavailable,after(first.nextAfter).status)
+            store.append("bob","demo",SendMessage(UUID.randomUUID().toString(),"live-206"))
+            val resumed=after(first.nextAfter).body<AfterPage>()
+            assertEquals((106L..125L).toList(),resumed.messages.map{it.sequence})
+            assertEquals(205L,resumed.throughSequence)
+            assertEquals(206L,store.history("demo").last().sequence)
+        } finally {client.close();proxy?.stop(0,1000);server.stop(0,1000)}
+    }
     @Test fun bothNotificationsLostThenSameIdRetryReturnsOriginalMessage() = runBlocking { exercise(AckLossMode.BOTH) }
     @Test fun lostHttpStillHasWebSocketAcceptanceAndReplayDoesNotDuplicate() = runBlocking { exercise(AckLossMode.HTTP_ONLY) }
 

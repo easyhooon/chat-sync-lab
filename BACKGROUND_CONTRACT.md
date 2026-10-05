@@ -1,50 +1,46 @@
 # 전경 소켓과 배경 Push의 경계
 
-현재 구현은 전경/배경 진입 경로의 분리와 로컬 adapter 검사까지입니다. 실제 Firebase Messaging SDK, token, FirebaseMessagingService, 알림 채널/권한 요청, 외부 sender는 없습니다. 실제 배경 수신 완료로 해석하지 않습니다.
+전경 자동 after 복구와 Room durable hint를 구현했다. 실제 Firebase Messaging 25.1.3의 FID 등록/service·WorkManager 수신 경로도 컴파일하지만 기본 opt-in은 꺼져 있다. 프로젝트·테스트 기기·발송 경로가 미지정이므로 실제 FCM 전달은 검증하지 않았다. [등록 계약과 CLI 절차](FCM_SETUP.md)를 따른다.
 
 ## 현재 소유권
 
 ```text
 Application / ProcessLifecycleOwner
-  ON_START → ForegroundChatSession → WebSocket bounded bootstrap + live
-  ON_STOP  → 해당 소켓 job 취소, generation 변경
+  ON_START → ForegroundChatSession → WS 최신20 bootstrap + live
+           → 공통 SyncCoordinator → HTTP after → Room transaction
+  ON_STOP  → 소켓과 전경 catch-up job 취소, generation 변경
 
 LocalPushAdapter.receive(boundAccount, PushEnvelope)
-  → ChatRepository.receive → 같은 Room transaction
-  또는 NeedsCatchUp(계정, 방, 서버 실행, throughSequence)
+  → 공통 repository/cache: body 병합 또는 durable SyncHint
 
-ChatViewModel → 프로세스 세션에 UI 명령만 위임
-화면 → Room PagingSource/Pager의 PagingData만 표시
+승인된 FCM opt-in의 onRegistered → private 등록 receipt
+onMessageReceived → 독립 boundAccount 검증 → 짧은 Room hint 저장
+                  → WorkManager → HTTP 최신 page + after (WS 없음)
+
+ChatViewModel → 세션에 UI 명령 위임
+화면 → Room PagingSource/Pager의 PagingData
 ```
 
-앱에 전경 Activity가 있는 동안 소켓을 유지합니다. Activity 회전/재생성과 화면 이동은 앱 배경으로 취급하지 않습니다. ProcessLifecycleOwner는 configuration change의 일시적인 Activity 정지를 배경으로 오판하지 않도록 지연해서 ON_STOP을 전달합니다. [공식 lifecycle 설명](https://developer.android.com/reference/androidx/lifecycle/ProcessLifecycleOwner)을 기준으로 합니다.
+Activity 재생성은 소켓 소유권을 바꾸지 않는다. ProcessLifecycleOwner는 configuration change의 일시적 정지를 배경으로 오판하지 않도록 지연해서 ON_STOP을 전달한다. [공식 lifecycle 설명](https://developer.android.com/reference/androidx/lifecycle/ProcessLifecycleOwner)을 따른다. 배경 경계에서 이미 commit한 저장은 유지하며 새 콜백은 종료된 generation이면 무시한다. 취소나 계정 전환이 원래 계정의 DB 기록을 새 계정으로 옮기지는 않는다.
 
-배경 전환은 다음 lifecycle callback까지 약간 지연될 수 있습니다. 경계에서 이미 처리 중이던 WS 저장이 끝나거나 Push가 같은 메시지를 다시 전달해도 원래 계정·방에 저장하고 같은 실행/서버 ID로 중복을 합칩니다. 새 callback은 종료된 generation이면 무시합니다. 취소가 이미 commit한 Room 기록을 rollback하지는 않습니다. 계정 전환 뒤 늦은 HTTP 수락/이미 시작한 병합도 원래 계정에 남고 새 계정 화면으로 새지 않습니다.
+boundAccount는 현재 UI Chip이나 payload에서 선택하지 않는다. FCM SDK 등록 완료 receipt에 연결된 로컬 테스트 신원을 독립적으로 읽는다. adapter는 Alice/Bob/demo만 허용하며 recipient/room/run/sequence와 body metadata를 검증한다. 이 binding과 X-Test-User는 제품 인증을 대신하지 않는다.
 
-`boundAccount`는 실제 로그인/토큰 등록 경계가 제공해야 합니다. payload의 recipientId만 믿고 계정을 선택하면 안 됩니다. 로컬 adapter는 Alice/Bob/demo 테스트 신원만 허용하며 recipient/room/serverInstance/sequence와 Message metadata를 맞춥니다. 이 검사는 제품 인증을 대신하지 않습니다.
+## before와 after
 
-## 복귀 catch-up은 과거 탐색과 다르다
+before는 가장 오래된 탐색 경계 이전이다. after는 이미 설정한 기준점 이후 실제로 연속 확인한 지점 다음이다. [복구 계약](CATCH_UP_CONTRACT.md)의 base/contiguous/target은 계정·방·서버 실행별로 Room에 저장한다. 높은 WS/Push 번호는 target만 올린다. 최신 bootstrap을 재수신해도 기존 연속 지점을 새 최신 번호로 바꾸지 않는다.
 
-- `before`: 지금 본 가장 오래된 경계 **이전**을 읽는 과거 탐색입니다.
-- 미래 `after`: 마지막으로 연속 확인한 `(serverInstanceId, sequence)` **이후**를 bounded page로 받아 누락을 보충해야 합니다.
+각 after 요청은 최대20개이며 해당 요청의 through target 이하만 반환한다. 페이지와 cursor는 같은 transaction이고 빈 구간·본문 충돌·scope 오류는 rollback한다. foreground/background coordinator는 계정·방별 Mutex를 공유한다. WS 저장은 HTTP를 기다리지 않으며, 유효한 늦은 응답·중복은 공통 캐시에서 합쳐진다. 복구 실패는 보존된 기록과 별도 오류/수동 reconnect를 표시한다. 새 live가 오면 다시 복구를 시도할 수 있다. 네트워크 장애의 자동 reconnect 백오프는 없다.
 
-전경 복귀의 WS 최신 20개만으로 배경 동안 100개가 왔을 때 전체 수신을 보장하지 못합니다. 현재는 최신 tail을 저장하고 과거 cursor를 그 경계에서 시작하게 합니다. 사용자가 끝까지 과거 조회하면 현재 서버 실행의 남은 과거를 가져올 수 있지만 자동 catch-up이라고 부르지 않습니다. `catchUpRequired` 상태와 `NeedsCatchUp` 결과는 이 후속 작업이 필요함을 나타내며, 실제 after API/worker/내구성 있는 sync queue는 아직 없습니다.
+첫 bootstrap 이전의 history는 before로 직접 읽는다. 서버 실행이 바뀌면 새 기준을 설정하고 이전 캐시를 보존한다. 메모리 서버에서 사라진 과거 실행의 누락은 새 서버로 복구할 수 없다. 클라이언트 durable hint는 서버 영속성 보장이 아니다.
 
-다음 연결 단위에서는 계정·방별 마지막 연속 확인 지점을 저장하고, 전경 복귀와 Push hint가 같은 sync coordinator에 합쳐져야 합니다. HTTP page+WS 중복은 현재 repository/Room 경로를 재사용합니다. after 응답이 끝났더라도 sync 시작 뒤의 live 경계를 함께 대조해야 합니다. serverInstance가 바뀌면 이전 메모리 서버의 누락은 복원할 수 없으므로 캐시는 보존하고 경계를 명시해야 합니다.
+## FCM 준비와 실제 전달의 구분
 
-## 실제 FCM을 연결할 때 지킬 계약
+새 API는 installation ID 등록 모드의 register() / onRegistered callback과 REST fid target이다. FIS.getId만 얻거나 register Task가 끝났다는 사실을 FCM 등록 receipt로 취급하지 않는다. SDK callback에서만 private receipt를 기록한다. [최신 설정](https://firebase.google.com/docs/cloud-messaging/android/get-started)과 [REST 계약](https://firebase.google.com/docs/reference/fcm/rest/v1/projects.messages)을 확인했다.
 
-FCM은 중복·지연·순서 변경·유실 가능성을 전제로 수신해야 합니다. Push를 완전한 history나 정확히 한 번 전달로 취급하지 않습니다. body가 있으면 동일 Message 키로 저장하고, ID/hint만 있거나 처리 시간이 부족하면 동기화를 예약합니다. notification과 data 메시지의 배경 진입 경로가 다르고 callback 처리 시간이 제한되므로 payload 정책과 worker 처리를 함께 결정해야 합니다. [FCM Android 수신 설명](https://firebase.google.com/docs/cloud-messaging/android/receive-messages)을 참고합니다.
+테스트 payload는 data-only catch_up hint다. service의 제한된 처리 시간에는 Room 저장과 worker 예약만 한다. worker는 HTTP를 사용하며 소켓을 열지 않는다. unique APPEND_OR_REPLACE chain은 작업 종료 경계에 들어온 새 hint도 후속 실행하도록 한다. 같은 힌트가 여러 작업을 예약할 수 있지만 Room에서 target·본문은 중복 병합한다. 최대4회 시도 후 실패하며 이후 전경 복귀/수동 reconnect로 계속할 수 있다.
 
-알림 표시와 데이터 정합성을 분리합니다. Android 알림 권한을 거절해도 채팅 화면과 복귀 동기화가 동작해야 하며, 알림을 못 띄웠다고 서버에 메시지가 없다고 판단하지 않습니다. 실제 권한 거절/FCM delivery는 아직 검증하지 않았습니다. [FCM Android 설정·권한](https://firebase.google.com/docs/cloud-messaging/android/get-started)을 참고합니다.
+알림 허용 여부는 동기화와 분리한다. 실제 API34 기기 검사에서 자신의 앱 알림 권한이 거절된 상태로 hint 저장/target 유지와 알림 미표시를 확인했다. 알림 허용 UX·실제 FCM 배경 전달·WorkManager 외부 수신 end-to-end는 미실행이다. 알림 클릭은 UI 계정을 임의 전환하지 않는다.
 
-OS가 메모리 때문에 프로세스를 종료한 것과 사용자가 Settings/adb로 force-stop한 것은 다릅니다. 프로세스 종료 후에는 수신 진입점이 새 프로세스를 시작할 수 있지만 이를 모든 기기/배터리 정책에서 보장하지 않습니다. force-stop은 앱이 중지된 상태이므로 사용자가 다시 열기 전 Push로 깨우는 동작에 의존하지 않습니다. Firebase의 [Android force-quit 설명](https://firebase.google.com/docs/cloud-messaging/flutter/receive-messages)은 수동 재실행이 필요함을 명시합니다. 이번 outbox force-stop 검사는 DB 복구 검사이며 FCM 수신 검사가 아닙니다.
+OS process kill과 사용자 force-stop은 다르다. force-stop 뒤 사용자가 앱을 다시 열기 전 Push wake-up에 의존하지 않는다. 이번 force-stop은 로컬 cursor 복구 검증이다. OS kill 후 실제 전달·배터리/제조사 정책은 검증하지 않았다. [Firebase 수신 설명](https://firebase.google.com/docs/cloud-messaging/android/receive-messages)을 참고한다.
 
-## 이후 연결에 필요한 최소 입력
-
-1. 사용자가 사용할 기존 Firebase 프로젝트와 dev.chatlab Android 앱 설정. 현재 저장소에는 google-services.json/FCM 설정이 없습니다.
-2. 그 프로젝트에 메시지를 보낼 승인된 서버 인증 경로. 인증정보를 APK/Git에 넣지 않습니다. 새 서비스 계정이나 지속 자격 증명은 현재 생성하지 않았습니다.
-3. 실제 로그인 계정↔기기 등록 신원의 binding/갱신/로그아웃 해제 계약. 테스트 X-Test-User는 제품용 binding이 아닙니다.
-4. Google Play services가 있는 검증 기기와 외부 FCM 전달이 가능한 네트워크, notification/data payload 정책과 Android 알림 권한 UX.
-
-이 입력이 결정되기 전에는 외부 Firebase 연결과 실제 배경 알림 수신을 완료했다고 보고하지 않습니다.
+프로젝트 선택·dev.chatlab 등록 대상·지정 기기·승인된 sender가 확정되기 전 외부 Firebase 등록/전송을 실행하지 않는다. 기존 CLI 로그인은 읽기 전용 목록 확인에만 사용했다. 다른 앱의 설정이나 자격증명을 재사용하지 않는다.

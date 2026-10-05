@@ -26,14 +26,15 @@ import kotlinx.serialization.json.Json
 import kotlin.time.Duration.Companion.seconds
 
 // Test source set only. No control route, fault headers, or production server changes.
-enum class AckLossMode(val port: Int) { BOTH(8081), HTTP_ONLY(8082), PAGE_FAILURE(8081) }
+enum class AckLossMode(val port: Int) { BOTH(8081), HTTP_ONLY(8082), PAGE_FAILURE(8081), CATCH_UP_FAILURE(8081) }
 
 fun main(args: Array<String>) {
     val mode = when (args.singleOrNull()) {
         "both" -> AckLossMode.BOTH
         "http-only" -> AckLossMode.HTTP_ONLY
         "page-failure" -> AckLossMode.PAGE_FAILURE
-        else -> error("Explicit opt-in required: -Pscenario=both, http-only, or page-failure")
+        "catch-up" -> AckLossMode.CATCH_UP_FAILURE
+        else -> error("Explicit opt-in required: -Pscenario=both, http-only, page-failure, or catch-up")
     }
     println("ACK_LOSS_PROXY_MODE mode=$mode listen=127.0.0.1:${mode.port} upstream=127.0.0.1:8080")
     embeddedServer(Netty, host = "127.0.0.1", port = mode.port) { ackLossProxyModule(mode) }.start(wait = true)
@@ -44,6 +45,7 @@ fun Application.ackLossProxyModule(mode: AckLossMode, upstreamPort: Int = 8080, 
     monitor.subscribe(ApplicationStopped) { upstream.close() }
     val faultedId = AtomicReference<String?>(null)
     val faultedPage = java.util.concurrent.atomic.AtomicBoolean(false)
+    val afterRequests = java.util.concurrent.atomic.AtomicInteger(0)
     val auth = ChatStore()
     install(io.ktor.server.plugins.contentnegotiation.ContentNegotiation) { json() }
     install(StatusPages) { exception<ChatError> { call, cause -> call.respond(HttpStatusCode.fromValue(cause.status), ApiError(cause.code, cause.message)) } }
@@ -56,6 +58,17 @@ fun Application.ackLossProxyModule(mode: AckLossMode, upstreamPort: Int = 8080, 
             install(access)
             get("/messages") {
                 val before = call.request.queryParameters["before"]
+                val after = call.request.queryParameters["after"]
+                if (mode == AckLossMode.CATCH_UP_FAILURE && after != null) {
+                    val number = afterRequests.incrementAndGet()
+                    println("PROXY_AFTER_REQUEST number=$number after=$after through=${call.request.queryParameters["through"]}")
+                    delay(1500)
+                    if (number == 2) {
+                        println("PROXY_AFTER_FAILED after=$after")
+                        call.respond(HttpStatusCode.ServiceUnavailable, ApiError("TEST_CATCH_UP_FAILURE", "Local test: resume from the committed after cursor"))
+                        return@get
+                    }
+                }
                 if (mode == AckLossMode.PAGE_FAILURE && before != null) {
                     println("PROXY_PAGE_REQUEST before=$before")
                     if (faultedPage.compareAndSet(false, true)) {
@@ -67,14 +80,17 @@ fun Application.ackLossProxyModule(mode: AckLossMode, upstreamPort: Int = 8080, 
                 }
                 val response = upstream.get("http://127.0.0.1:$upstreamPort/rooms/demo/messages") { header("X-Test-User", call.request.header("X-Test-User")!!)
                     url { parameters.appendAll(call.request.queryParameters) } }
-                if (response.status.isSuccess()) call.respond(response.status, response.body<History>())
+                if (response.status.isSuccess()) {
+                    if (after != null) call.respond(response.status, response.body<AfterPage>())
+                    else call.respond(response.status, response.body<History>())
+                }
                 else call.respond(response.status, response.body<ApiError>())
             }
             post("/messages") {
                 val user = call.request.header("X-Test-User")!!
                 val request = call.receive<SendMessage>()
                 // Arm BEFORE forwarding: an upstream WS echo can beat the upstream HTTP response.
-                val inject = mode != AckLossMode.PAGE_FAILURE && user == "alice" && faultedId.compareAndSet(null, request.clientMessageId)
+                val inject = mode in setOf(AckLossMode.BOTH, AckLossMode.HTTP_ONLY) && user == "alice" && faultedId.compareAndSet(null, request.clientMessageId)
                 val response = upstream.post("http://127.0.0.1:$upstreamPort/rooms/demo/messages") {
                     header("X-Test-User", user); contentType(ContentType.Application.Json); setBody(request)
                 }
