@@ -1,100 +1,231 @@
 # Chat Sync Lab
 
-Kotlin 개발자를 위한 작은 실시간 채팅 학습 프로젝트. **Ktor 서버 + Android Compose/Ktor Client(OkHttp 엔진)**로 Alice/Bob 두 테스트 신원이 한 방에서 텍스트를 주고받는다.
+Kotlin/Ktor 서버와 Android Compose 앱으로 Alice/Bob 두 테스트 신원이 `demo` 방에서 텍스트를 주고받는 로컬 학습 프로젝트다. HTTP 전송·WebSocket 수신·Room outbox/수신 캐시·Paging·누락 복구의 데이터 경로를 관찰한다.
 
-첫 목표는 실제 네트워크 경로와 메시지 정합성을 관찰하는 것이다. 서버 하나와 Android app 하나로 구성한다. Android는 **Room outbox + 수신 캐시의 PagingSource**를 화면의 단일 읽기 경로로 쓰며, 서버는 계속 메모리다. 실제 인증·자동 재전송/재연결·읽음 기능은 아직 없다. 서버는 `127.0.0.1:8080`에만 바인딩한다.
+**기본 채팅은 Mac의 로컬 서버로 실행한다. AWS 연동·배포, Firebase 프로젝트/설정, 결제 연결, 서비스계정 JSON이 필요하지 않다.** 서버는 `127.0.0.1:8080`에만 바인딩한다. 실제 로그인·읽음·서버 영속 DB·자동 reconnect 백오프는 없다.
 
-- [범위·화면 상태·JSON 계약](SCOPE.md)
-- [Android 관점으로 읽는 데이터 경로와 실패 시나리오](STUDY_GUIDE.md)
-- [실제 검증 결과와 한계](VERIFICATION.md)
-- [outbox 예상·재현·테스트 실습](OUTBOX_EXERCISE.md)
-- [수신 캐시와 늦은 snapshot을 이해하는 15분 실습](CACHE_EXERCISE.md)
-- [현재 과거 cursor·Room Paging 계약](PAGING_CONTRACT.md)
-- [과거 조회 실패·실시간 수신·스크롤 실습](PAGING_EXERCISE.md)
-- [전경 소켓·배경 Push의 구현 경계](BACKGROUND_CONTRACT.md)
-- [연속 확인 지점과 bounded after 계약](CATCH_UP_CONTRACT.md)
-- [누락120개·중단·이어받기 실습](CATCH_UP_EXERCISE.md)
-- [최신 FID 등록과 CLI 연결 준비](FCM_SETUP.md)
+| 실행할 부분 | 필요한 것 |
+|---|---|
+| Ktor 서버·HTTP/WS 테스트 | JDK 21, Git, 프로젝트 Gradle Wrapper. HTTP 확인에 curl |
+| Android 기본 채팅 | 위 환경 + Android SDK 36/build-tools 36.0.0/platform-tools, API 26 이상 기기 또는 에뮬레이터 |
+| 선택적인 FID/FCM 배경 Push | 위 환경 + 기존 승인된 Firebase 설정·Play services 기기·발송 경로. [FCM_SETUP](FCM_SETUP.md) 참고 |
 
-두 번째 학습 단위는 **수락 알림을 못 받아 UNKNOWN인 메시지를 같은 ID로 수동 재시도**하는 것이다. 기본 앱/서버에는 실패 주입이 없다. [학습 안내의 두 번째 단위](STUDY_GUIDE.md#두-번째-학습-단위-timeout이-서버-기록을-지우지는-않는다)를 따라 별도 테스트 프록시와 debug 학습 모드로만 실행한다.
-
-세 번째 단위는 **프로세스 종료 뒤에도 같은 ID·본문·계정·방·상태를 복구**하는 Room outbox다. 로컬 저장 완료 뒤에만 POST하며, 새 프로세스의 남은 SENDING은 UNKNOWN으로 복구한다. 자동 재전송하지 않는다. [Room의 실패 경계와 다음 캐시·페이징 단계](STUDY_GUIDE.md#세-번째-학습-단위-room-outbox와-프로세스-종료)를 읽으며 실제 종료/재실행을 따라할 수 있다.
-
-네 번째 단위는 **수신 기록을 계정·방별 Room에 보존**하는 것입니다. HTTP history, WebSocket snapshot/event, POST 수락이 같은 저장 경로로 합쳐집니다. 당시 DB Flow 읽기는 아래 다섯 번째 단위의 Room Paging으로 확장했습니다. 빈 snapshot으로 과거 캐시를 지우지 않고, 서버 실행 UUID로 재시작 뒤 sequence 재사용을 구분합니다. [직접 예측하고 테스트하기](CACHE_EXERCISE.md)로 먼저 확인하세요.
-
-다섯 번째 단위는 **최신 20개 WS bootstrap + 배타적 before cursor + Room Paging**입니다. 과거 조회와 live 수신은 같은 캐시로 합치고, 실패한 과거 요청은 같은 cursor로 수동 재시도합니다. 전경 소켓은 Application의 ProcessLifecycleOwner가 관리하므로 Activity 재생성으로 끊기지 않습니다. 배경에서는 소켓을 닫습니다. 로컬 Push adapter 검사는 공통 저장 경로를 확인하며 실제 FCM 전달은 아래 여섯 번째 연결 검증까지 진행했습니다.
-
-여섯 번째 단위는 **기준점 이후 연속 확인 지점을 Room에 보존하고 after20개씩 누락을 자동 보충**합니다. 높은 Push/WS 번호가 먼저 도착해도 빈 구간을 건너뛰지 않습니다. 중단된 commit 지점부터 재실행하며 before 과거 탐색과 구분합니다. FID 기반 Messaging SDK/service/worker는 준비했고, 기본 빌드는 Firebase 등록을 실행하지 않습니다. 사용자 승인 후 전용 프로젝트/dev.chatlab을 등록하고 emulator Alice의 실제 FID 등록·배경 data 수신·HTTP 복구를 확인했습니다. 기본 빌드는 외부 등록을 켜지 않습니다. [FCM 실행](FCM_SETUP.md)에 설정 보관 위치와 경계를 남겼습니다.
+기본 빌드에도 Messaging 라이브러리 의존성은 있지만 FCM 등록은 꺼져 있다. 아래 명령은 `-PchatFcmEnabled=false`로 기본 모드를 명시한다. 최초 의존성 다운로드에는 인터넷이 필요하며 Google Maven·Maven Central·Gradle Plugin Portal을 사용한다. 별도 Gradle 설치나 서버 DB/Docker는 필요하지 않다.
 
 ## 실행
 
-기존 JDK 21, Android SDK 36/build-tools 36.0.0, `adb`와 ARM64 에뮬레이터가 필요하다. 프로젝트 의존성은 Google Maven·Maven Central·Gradle Plugin Portal에서 받는다. 시스템 도구를 자동 설치하지 않는다.
+### 1. 새 checkout과 JDK 확인
 
-Android Studio에서 디렉터리를 열거나 로컬 `local.properties`에 **본인의** SDK 경로를 지정한다. 이 파일은 Git에서 제외된다.
-
-```properties
-sdk.dir=/absolute/path/to/Android/sdk
-```
+새 디렉터리에서 다음을 실행한다. 이미 checkout이 있다면 해당 저장소 루트로 이동해 JDK 확인부터 진행한다.
 
 ```bash
-./gradlew :server:test :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
+git clone https://github.com/easyhooon/chat-sync-lab.git
+cd chat-sync-lab
+java -version
+./gradlew --version
 ```
 
-관찰한 에뮬레이터 한 개를 실행한 뒤 실제 Room DB 검사를 추가로 실행한다. 테스트는 임시 DB만 만들고 제거하며 검사 자체는 실제 앱 DB를 직접 지우지 않는다. 다만 Android 테스트 도구가 종료 시 대상 APK를 제거할 수 있으므로 수동 데모는 테스트가 끝난 뒤 APK를 설치해 실행한다.
+JDK 21이 필요하다. 이 Mac에서 확인한 환경은 Temurin 21.0.11, Gradle Wrapper 9.2.1이다. Mac에 JDK 21이 설치되어 있지만 다른 Java가 선택됐다면 현재 터미널에서 다음을 사용한다.
 
 ```bash
-ANDROID_SERIAL=<observed-serial> ./gradlew -Pandroid.injected.device.serial=<observed-serial> \
-  :app:connectedDebugAndroidTest
+export JAVA_HOME="$(/usr/libexec/java_home -v 21)"
+java -version
 ```
 
-터미널 하나에서 서버를 유지한다.
+서버만 실행할 때는 Android SDK 경로·`local.properties`·`app/google-services.json`이 필요하지 않다.
+
+### 2. 터미널 A: 로컬 Ktor 서버 시작
+
+저장소 루트에서 실행하고 터미널을 유지한다. `server/build/install/...`은 처음부터 존재하지 않으므로 새 checkout의 시작 명령은 Gradle task다.
 
 ```bash
-./gradlew :server:run
+./gradlew -PchatFcmEnabled=false :server:run --console=plain
 ```
 
-설치돼 있는 AVD 하나를 Android Studio에서 시작한다. 이번 검증은 기존 Pixel_8a(API 34)를 `-read-only -no-snapshot`으로 실행했다. 기존 AVD를 그대로 검증하려면 다음처럼 실행할 수 있다(AVD 이름은 본인 환경에 맞춘다).
+`Responding at http://127.0.0.1:8080`이 나오면 준비됐다. 이 명령은 서버가 살아 있는 동안 계속 실행된다. Kotlin 코드를 수정했다면 서버를 종료한 뒤 같은 명령으로 다시 시작한다.
+
+### 3. 터미널 B: health와 기록 확인
+
+동일 저장소 루트의 다른 터미널에서 실행한다. `--noproxy '*'`는 이 로컬 요청을 시스템 HTTP proxy로 보내지 않도록 한다.
 
 ```bash
+curl --noproxy '*' --fail --silent --show-error \
+  http://127.0.0.1:8080/health
+```
+
+기대 응답은 `{"status":"ok"}`다. health에는 신원 헤더가 필요하지 않다. 대화방 API에는 개발용 테스트 신원을 넣는다.
+
+```bash
+curl --noproxy '*' --fail --silent --show-error \
+  -H 'X-Test-User: alice' \
+  http://127.0.0.1:8080/rooms/demo/messages
+```
+
+새 서버는 `messages=[]`, `highWatermark=0`이다. 이후 조회는 기본 최신20개 페이지이며 전체 history가 아니다. 헤더 없는 방 요청은401, 접근 불가 방은403이다. `X-Test-User`는 로컬 테스트용이며 제품 인증을 대신하지 않는다.
+
+Android 실행 전 Bob 텍스트 전송으로 서버를 확인할 수 있다.
+
+```bash
+curl --noproxy '*' --fail --silent --show-error \
+  -H 'X-Test-User: bob' -H 'Content-Type: application/json' \
+  -d '{"clientMessageId":"11111111-1111-4111-8111-111111111111","text":"README local smoke"}' \
+  http://127.0.0.1:8080/rooms/demo/messages
+```
+
+Message JSON을 받는다. 첫 전송은201, 같은 ID/본문 재실행은200과 같은 서버 ID·sequence다. 같은 ID에 다른 본문은409다. 기본 앱을 Alice로 열면 최신 기록에서 이 Bob 메시지를 확인할 수 있다.
+
+### 4. Android SDK와 기본 APK 빌드
+
+Android Studio의 SDK Manager에서 SDK 36/build-tools 36.0.0/platform-tools와 사용할 시스템 이미지를 준비한다. ARM Mac에는 해당 ABI의 이미지를 사용한다. 기본 채팅에 Play services는 필수가 아니며 FCM 검증에는 필요하다.
+
+다른 터미널에서 **본인의 SDK 경로**를 지정한다. 아래는 Mac 기본 경로 예시다. Android Studio가 생성한 ignored `local.properties`의 `sdk.dir`를 사용해도 된다. 서버 전용 실행에는 이 단계가 필요하지 않다.
+
+```bash
+export CHAT_ANDROID_SDK="$HOME/Library/Android/sdk"
+export ANDROID_HOME="$CHAT_ANDROID_SDK"
+export PATH="$CHAT_ANDROID_SDK/platform-tools:$CHAT_ANDROID_SDK/emulator:$PATH"
+./gradlew -PchatFcmEnabled=false :app:assembleDebug
+```
+
+APK는 `app/build/outputs/apk/debug/app-debug.apk`다. Android Studio와 같은 SDK의 adb를 사용한다. Homebrew의 다른 adb가 먼저 선택되지 않았는지 확인할 수 있다.
+
+```bash
+command -v adb
+adb version
+emulator -list-avds
+adb devices -l
+```
+
+### 5. 에뮬레이터 한 개 연결
+
+이미 실행 중인 대상이 있으면 사용한다. 새 AVD는 Android Studio Device Manager에서 시작하거나, 위 목록에 있는 **본인의 AVD 이름**으로 실행한다. 영상 등 다른 작업의 에뮬레이터와 동시 실행할 자원이 부족하면 그 작업이 끝난 뒤 시작한다.
+
+```bash
+# Pixel_8a는 이 Mac의 예시 이름이다. 자신의 목록에 있는 이름으로 바꾼다.
 emulator -avd Pixel_8a -read-only -no-snapshot -no-audio -memory 2048 -cores 2
 ```
 
-다른 터미널에서 기기 목록을 확인한 뒤 대상 serial만 선택한다. 아래 `emulator-5554`는 이번 검증에서 관찰한 값이다.
+새 터미널에서는 위 SDK/PATH 설정도 적용한다. `adb devices -l`에서 상태가 `device`인 대상 serial을 선택하고 모든 기기 명령에 명시한다. 아래 `emulator-5554`는 예시이며 실제 목록과 대조해 바꾼다.
 
 ```bash
 adb devices -l
-adb -s emulator-5554 reverse tcp:8080 tcp:8080
-adb -s emulator-5554 install -r app/build/outputs/apk/debug/app-debug.apk
-adb -s emulator-5554 shell am start -n dev.chatlab/.MainActivity
+export CHAT_ANDROID_SERIAL=emulator-5554
+adb -s "$CHAT_ANDROID_SERIAL" shell getprop sys.boot_completed
+adb -s "$CHAT_ANDROID_SERIAL" reverse tcp:8080 tcp:8080
+adb -s "$CHAT_ANDROID_SERIAL" reverse --list
+adb -s "$CHAT_ANDROID_SERIAL" install -r app/build/outputs/apk/debug/app-debug.apk
+adb -s "$CHAT_ANDROID_SERIAL" shell am start -n dev.chatlab/.MainActivity
 ```
 
-전체 검사가 끝난 뒤 APK를 설치합니다. 여러 AVD가 연결돼 있으면 위 검사 명령에도 serial을 반드시 지정합니다. 화면이 Alice·연결됨인지 확인하고, 별도 터미널에서 Bob peer를 실행한다.
+부팅 값은1, 설치는 `Success`, 화면은 Alice·연결됨이 기대 결과다. 앱의 `127.0.0.1:8080`을 `adb reverse`가 Mac의 같은 포트로 전달한다. Mac에서 health가 성공해도 reverse가 없으면 앱 연결은 실패한다. 기본 앱은 debug HTTP를 허용하며 위 실행에는 `ack_loss_lab`/`fcm_test_account` extra를 넣지 않는다.
+
+### 6. Android ↔ Bob 실시간 왕복
+
+앱이 연결된 뒤 또 다른 터미널에서 저장소 루트의 Bob peer를 실행한다.
 
 ```bash
-./gradlew :server:demoClient --console=plain
+./gradlew -PchatFcmEnabled=false :server:demoClient --console=plain
 ```
 
-`BOB_READY`가 나오면 **2분 이내** 앱에서 `ping`을 보낸다. Bob은 새 Alice 이벤트를 받은 뒤 `Bob reply: ping`을 HTTP로 전송한다. 앱에 응답이 보이고 콘솔에 `ROUND_TRIP_PASS`가 나오면 왕복 성공이다. 오래 걸려 timeout이 나면 peer 명령만 다시 실행한다.
+`BOB_READY` 이후 **2분 이내** Android Alice가 `ping`을 보낸다. Bob은 새 Alice 이벤트를 WS로 받고 `Bob reply: ping`을 HTTP로 보낸다. Android 응답 표시와 peer의 `ROUND_TRIP_PASS`를 함께 확인한다. timeout이면 peer 명령만 다시 실행한다. 신원 Chip 전환은 현재 화면 계정을 바꾸는 로컬 도구이며 서버의 실제 로그인 기능이 아니다.
 
-`SENT`/“서버 수락”은 **표시한 서버 실행의 메모리 기록에 들어갔다**는 뜻이다. 영속 저장·상대 수신·읽음을 뜻하지 않는다. 서버를 종료하면 서버 기록과 중복 키 인덱스는 사라지지만 기기가 관찰해 저장한 캐시는 남는다. 캐시의 SENT는 과거 실행의 수락도 포함하며, 실행 ID와 sequence를 함께 표시한다.
+## 종료·재시작과 저장 경계
 
-`UNKNOWN` 행의 “같은 ID로 재시도”는 기존 ID·본문을 유지한다. 연결된 자신의 미확인 행만 재시도하며, 이미 WS로 수락을 확인했다면 HTTP가 timeout 나도 SENT를 유지한다.
+서버를 실행한 터미널 A에서 **Ctrl+C**로 자신의 서버를 종료한다. 새 연결이 거절되는지 확인한다.
 
-## 직접 해볼 실험
+```bash
+curl --noproxy '*' --connect-timeout 2 --fail --silent --show-error \
+  http://127.0.0.1:8080/health
+```
 
-서버를 실행한 상태에서 다음을 실행한다. 같은 `clientMessageId`·본문으로 두 번 보내도 같은 서버 ID와 sequence를 반환하고 기록은 하나만 늘어난다. 같은 ID에 다른 본문을 보내면 `409`를 반환한다.
+서버가 종료됐다면 curl 연결 실패가 기대 결과다. 재시작은 같은 명령이다.
+
+```bash
+./gradlew -PchatFcmEnabled=false :server:run --console=plain
+```
+
+health 성공 뒤 대화방 조회를 다시 하면 새 `serverInstanceId`, 빈 `messages`, `highWatermark=0`이다. 실행 중인 앱은 필요하면 **다시 연결**을 누른다. 실제 신원 변경 없이 새 서버 실행과 이전 캐시를 구분한다.
+
+| 종료/변경 | 남는 것 |
+|---|---|
+| Ktor 서버 종료/재시작 | 서버 메시지·idempotency 인덱스는 사라지고 실행 UUID/sequence가 새로 시작한다 |
+| 같은 기기의 앱 process 종료/재실행 | Room outbox·관찰한 수신 캐시·before/after 키는 남는다. 이전 SENDING은 UNKNOWN으로 복구하며 자동 POST 재전송은 없다 |
+| 서버 재시작 후 앱 복귀 | 이전 실행의 캐시는 보존하고 새 실행을 별도 namespace로 저장한다. 이전 서버에서 못 받은 기록을 새 서버가 복원하지 못한다 |
+| read-only AVD 종료 | 임시 기기 데이터가 다음 AVD 실행에도 남는다고 보장하지 않는다. 일반 앱 process 재시작과 다른 경계다 |
+| 앱 데이터 삭제/삭제 설치 | Room 보존 범위 밖이다. 캐시를 초기화하려고 `pm clear`나 uninstall을 기본 절차로 사용하지 않는다 |
+
+`SENT`/“서버 수락”은 표시한 서버 실행의 메모리 기록에 들어갔다는 뜻이다. 영속 서버 저장·상대 수신·읽음은 아니다. Room은 기기가 실제 관찰한 기록을 저장하며 서버의 완전한 history를 대신하지 않는다. UNKNOWN 수동 retry는 원래 ID/본문을 유지하고 이미 수락된 receipt를 늦은 HTTP 실패가 되돌리지 않는다.
+
+앱만 중지하거나 자신의 reverse만 해제할 때는 선택한 serial에 실행한다.
+
+```bash
+adb -s "$CHAT_ANDROID_SERIAL" shell am force-stop dev.chatlab
+adb -s "$CHAT_ANDROID_SERIAL" reverse --remove tcp:8080
+# 다시 연결할 때:
+adb -s "$CHAT_ANDROID_SERIAL" reverse tcp:8080 tcp:8080
+adb -s "$CHAT_ANDROID_SERIAL" shell am start -n dev.chatlab/.MainActivity
+```
+
+본인이 시작한 에뮬레이터를 완전히 종료할 때만 `adb -s "$CHAT_ANDROID_SERIAL" emu kill`을 사용한다. 다른 앱/AVD를 종료하지 않는다. force-stop은 FCM wake-up 실험과 다른 경계다.
+
+## 문제 해결
+
+| 관찰한 증상 | 확인할 것 |
+|---|---|
+| Java/Gradle 오류 | `java -version`, `./gradlew --version`에서 JDK21 확인. 시스템 Gradle 대신 저장소 `./gradlew` 사용 |
+| SDK location not found | Android 빌드 터미널의 ANDROID_HOME 또는 ignored local.properties의 sdk.dir 확인. server만 실행할 때 Android task를 함께 요청하지 않음 |
+| Connection refused/health 실패 | 서버 터미널의 시작 로그와8080 포트 확인. 서버 시작 전에 curl했다면 준비 후 다시 실행 |
+| Address already in use | Mac에서 `lsof -nP -iTCP:8080 -sTCP:LISTEN`으로 소유자 확인. 코드 포트는8080 고정이며 다른 프로세스를 임의 종료하지 않음 |
+| Mac health는 성공, 앱 연결 실패 | 같은 SDK의 adb·선택 serial·부팅1·reverse --list 확인 후 reverse 재등록/다시 연결 |
+| device offline/no devices/multiple devices | 기기 목록을 관찰하고 연결된 `device` serial을 명시. APK 설치와 모든 adb 명령에 `-s` 사용 |
+| 401/403 | 방 HTTP/WS의 X-Test-User가 alice/bob인지, 방이 demo인지 확인 |
+| 409 CURSOR_EXPIRED | 서버 실행이 바뀐 과거/after cursor다. 앱에서 다시 연결해 새 실행의 bootstrap을 확인 |
+| 기록이 재시작 뒤 화면에 남음 | 앱 Room의 관찰 캐시일 수 있다. 서버 GET의 새 실행/빈 history와 앱의 표시 실행 ID를 구분 |
+| 과거/누락 복구 실패 | 받은 기록은 보존된다. 서버와 reverse를 확인하고 표시된 retry/다시 연결 사용 |
+| Room 기기 검사 뒤 Activity를 찾지 못함 | instrumentation 종료 시 대상 APK가 제거될 수 있다. 검사가 모두 끝난 뒤 debug APK를 다시 설치하고 수동 데모 진행 |
+
+## 선택 사항: 기존 FID/FCM 연결
+
+위 로컬 채팅 실행에는 Firebase 결제·서비스계정 JSON·AWS 설정이 필요하지 않다. FCM은 앱이 배경일 때 hint를 받고 같은 로컬 서버에 HTTP로 복구하는 선택 경로다. Ktor 서버 자체는 여전히 Mac loopback에서 실행하며 AWS sender로 배포되지 않았다.
+
+사용자 승인 후 전용 프로젝트/dev.chatlab/emulator Alice로 실제 FID 등록·단일 data 전송·새 배경 process 수신을 검증했다. 기본 빌드는 꺼져 있고, opt-in은 승인된 ignored `app/google-services.json`과 명시 설정이 필요하다. 설정 보관·SDK 등록 완료 조건·발송 권한·실제 검사·서비스계정 JSON 미구성은 [FCM_SETUP](FCM_SETUP.md)에 있다. FID/키/토큰/설정 파일을 README·Git·채팅에 붙여넣지 않는다.
+
+현재 Ktor 서버에는 지속 FCM sender나 발송 REST endpoint가 없다. 로컬 기본 채팅을 띄웠다고 외부 Push가 전송되지는 않는다. 기존 승인 대상의 테스트 발송은 FCM_SETUP의 범위와 기존 권한을 확인한 뒤 별도로 수행한다. 이번 README 명령 검증에는 새 프로젝트·결제·자격증명·FCM 전송이 포함되지 않는다.
+
+## 검사와 학습 자료
+
+기본 서버 검사와 Android 빌드는 다음과 같다. 기기 없이 수행할 수 있다.
+
+```bash
+./gradlew -PchatFcmEnabled=false :server:test :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
+```
+
+실제 Room/Paging 기기 검사는 사용 가능한 한 기기를 관찰한 후 두 serial 제한을 함께 지정한다. 영상 등 다른 기기 작업과 겹치지 않게 실행한다.
+
+```bash
+ANDROID_SERIAL="$CHAT_ANDROID_SERIAL" ./gradlew -PchatFcmEnabled=false \
+  -Pandroid.injected.device.serial="$CHAT_ANDROID_SERIAL" :app:connectedDebugAndroidTest
+```
+
+같은 ID 재전송 실험에는 Python3가 추가로 필요하다. 최신 page 개수로 증가를 대조하는 스크립트이므로 **새로 시작한 서버의 기록이20개 미만일 때** 실행한다. 이 실험을 위해 종료할 때도 본인이 시작한 서버만 대상으로 한다.
 
 ```bash
 bash scripts/idempotency-demo.sh
 ```
 
-이 실험의 의미와 서버 재시작 후 보장이 사라지는 이유는 [학습 안내](STUDY_GUIDE.md)에 있다.
+- [범위·화면 상태·JSON 계약](SCOPE.md)
+- [Android 개발자 관점의 데이터 경로·실패 시나리오](STUDY_GUIDE.md)
+- [실제 검증 결과와 이번 README 명령의 검증 범위](VERIFICATION.md)
+- [프로세스 종료·outbox 실습](OUTBOX_EXERCISE.md)
+- [수신 캐시·늦은 snapshot 실습](CACHE_EXERCISE.md)
+- [before cursor·Room Paging 계약](PAGING_CONTRACT.md), [과거 조회·live·스크롤 실습](PAGING_EXERCISE.md)
+- [전경 소켓·배경 Push의 경계](BACKGROUND_CONTRACT.md)
+- [연속 확인 지점·bounded after 계약](CATCH_UP_CONTRACT.md), [누락·중단·이어받기 실습](CATCH_UP_EXERCISE.md)
+- [FID 연결·운영 migration과 이번 실험의 차이](FCM_SETUP.md)
 
 ## 폴더
 
-- `server`: 신원·방 검사, 메모리 store, HTTP/WS, 서버 테스트와 Bob peer.
-- `app`: Compose/Paging 화면, 프로세스 전경 세션, 공통 repository, Room outbox·수신 캐시·페이지 키, sync cursor/hint, schema v1/v2/v3/v4와 실제 DB 검사.
-- `scripts`: 로컬 재현 실험·검증 증거 대조.
-- `evidence`(Git 제외): 이 Mac에서 만든 화면·로그·history·빌드 증거.
-
-서버와 에뮬레이터를 멈출 때는 본인이 시작한 실행 세션만 종료한다. 외부 배포·방화벽 변경은 필요하지 않다.
+- `server`: 테스트 신원/방 검사, 메모리 store, HTTP/WS, 검사와 Bob peer.
+- `app`: Compose/Paging 화면, 프로세스 전경 세션, 공통 repository, Room outbox·캐시·cursor, schema v1–v4.
+- `scripts`: 로컬 실험과 증거 대조.
+- `evidence`(Git 제외): 이 Mac의 빌드·화면·로그·DB·history 증거. 새 checkout에 포함되지 않는다.

@@ -336,3 +336,29 @@ python3 scripts/verify-fcm-evidence.py
 빈 bootstrap 수정 전 조건을 잠깐 복원해 추가한 실제 기기 테스트만 실행했을 때1개/1개 실패, 원래 MessageCache.kt:83 IllegalArgumentException을 JUnit XML로 확인했다. finally에서 수정본을 복원한 뒤 전체43개 성공을 확인해 red→green을 검증했다. 최초 red 증거 수집기는 AGP 출력에 Tests1/1 completed가 있을 것으로 가정하여 중단됐고, Finished1tests 출력과 전체 XML을 확인해 집계했다. source는 중단 시에도 복원됐으며 실패 XML/원래 로그를 보존했다.
 
 fresh-build-final/fresh-room-final/fresh-optin-build-final 로그, red-green-summary와 empty-bootstrap-red-results, fresh-verification-summary.json이 최신 근거다. verify-fcm-evidence3PASS와 verify-catch-up-evidence5PASS도 다시 실행했다. 최신 source diff/민감 설정 제외를 확인한 뒤 일반 커밋/푸시한다.
+
+## README 로컬 실행 절차 재검증 — 2026-10-06 UTC
+
+이번 변경은 README와 이 검증 기록이다. 기본 채팅 서버가 AWS 배포 없이 Mac loopback에서 실행되고 Firebase 설정·결제 연결이 필요하지 않음을 명시했다. 새 checkout부터 서버 시작/health/테스트 신원/Android SDK와 reverse/왕복/종료·재시작/문제 해결을 순서대로 적었다. FID/FCM은 기존 승인 설정을 사용하는 별도 선택 경로이며 [FCM_SETUP](FCM_SETUP.md)으로 연결한다.
+
+검증 대상 소스는 main `70b43b8c32af43b4f8b6f0b8583c0328bf018a0f`다. tracked source만 새 임시 디렉터리에 추출한 경우와 기존 GitHub 저장소에서 실제 새 clone한 경우를 확인했다. 둘 다 `local.properties`·`app/google-services.json`·프로젝트 build 출력 없이 시작했다. 호스트의 기존 JDK21/Android SDK/전역 Gradle 의존성 캐시는 사용했으며, 모든 도구와 의존성이 없는 새 Mac 검증은 아니다.
+
+| 이번 검사 | 실제 결과 |
+|---|---|
+| 서버 전용 환경 | ANDROID_HOME/ANDROID_SDK_ROOT를 unset하고 `:server:installDist :server:test` 실행. 37초 성공, 서버17개/실패·오류·스킵0. Android SDK 경로 설정과 Firebase client 설정 불필요 |
+| 새 clone 서버 시작 | `./gradlew -PchatFcmEnabled=false :server:run --console=plain`으로 시작, 127.0.0.1:8080 바인딩·준비 로그 확인 |
+| HTTP 시작 확인 | health `status=ok`, 초기 history 비어 있음/highWatermark0 |
+| 합성 메시지와 접근 | README Bob POST 첫201, 동일 ID/본문200·동일 receipt, 본문 충돌409. 신원 없음401, alice의 접근 불가 방403 |
+| 기존 idempotency 실험 | 새 서버의 작은 기록에서 `bash scripts/idempotency-demo.sh` 성공. 201/200/409와 정확히 한 행 증가 확인 |
+| Bob CLI 왕복 | 새 clone의 `:server:demoClient` 실행, BOB_READY 뒤 curl Alice ping. Bob WS 수신→HTTP reply→자기 WS echo→history 일치, ROUND_TRIP_PASS/history4·Gradle exit0 |
+| 종료/재시작 | 자신의 서버 Ctrl+C 후 curl exit7/연결 거절. 같은 명령 재시작 후 health 성공, 이전과 다른 serverInstanceId·빈 history/highWatermark0. 검사 뒤 자신의 서버 종료 |
+| 기본 검사·APK·lint | README의 `-PchatFcmEnabled=false :server:test :app:testDebugUnitTest :app:assembleDebug :app:lintDebug` 실행. 48초/exit0, 58 task 중55 실행·3 up-to-date. 서버17/JVM8, 각각 실패·오류·스킵0. APK 생성, CHAT_FCM_ENABLED=false. lint 오류0/경고20 |
+| 문서 확인 | bash 코드블록17개 문법과 로컬 링크 대상 통과. 명령·loopback 주소·신원 검사·default FCM gate·Room/process 경계를 현재 코드와 대조, git diff --check 통과 |
+
+서버 종료의 Ctrl+C/exit130과 종료 후 curl exit7은 기대한 종료 동작이다. 빌드·검사 실패는 없다. 빌드에는 SDK XML 버전 및 일부 native library strip 경고가 있으며 시스템 도구를 설치하거나 변경하지 않았다.
+
+이번에는 다른 영상 작업과 기기 자원을 공유하지 않도록 AVD 시작·앱 설치·adb reverse 등록·Android 화면 왕복·connectedDebugAndroidTest를 실행하지 않았다. 위 CLI 왕복의 Alice는 curl이며 Android UI 수신의 이번 증거로 계산하지 않는다. 이전 Android43개와 실제 FCM 수신 결과는 앞 절의 별도 날짜 증거다. 이번에는 FCM 발송·새 cloud 설정·결제·자격증명 작업이 없다.
+
+Room 보존과 새 서버 namespace의 설명은 현재 구현 및 이전 기기 검증에 근거한다. 이번 서버 재시작에서는 서버 메모리 초기화만 다시 관찰했다. 서버를 종료하면 메모리 메시지·idempotency 인덱스는 사라지며, 이전에 기기가 관찰한 Room 기록이 서버의 영속 history를 대신하지 않는다.
+
+로컬 ignored `evidence/readme-local-run/`의 clean-build/default-build/peer/restart-server 로그, HTTP 응답·상태, http/lifecycle/build/doc-check summary가 근거다. 새 clone/추출 경로도 이 디렉터리에 기록한다. 검증 서버는 종료된 상태다. 다음 직접 실행은 [README 실행](README.md#실행)의 서버 명령부터 시작하고, 기기 작업이 끝난 뒤 한 Android 세션을 reverse로 연결해 Bob peer와 `ping` 왕복을 확인한다.
